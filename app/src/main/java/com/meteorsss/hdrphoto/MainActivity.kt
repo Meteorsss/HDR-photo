@@ -43,6 +43,7 @@ data class PhotoItem(
     val width: Int,
     val height: Int,
     val liveVideoUri: Uri?,
+    val sizeBytes: Long = 0L,
     val dateMillis: Long = 0L,
     val bucketId: String = "",
     val bucketName: String = "",
@@ -294,6 +295,7 @@ class MainActivity : Activity() {
             MediaStore.Images.Media.DISPLAY_NAME,
             MediaStore.Images.Media.WIDTH,
             MediaStore.Images.Media.HEIGHT,
+            MediaStore.Images.Media.SIZE,
             MediaStore.Images.Media.DATE_TAKEN,
             MediaStore.Images.Media.DATE_ADDED,
             MediaStore.Images.Media.DATE_MODIFIED,
@@ -310,6 +312,7 @@ class MainActivity : Activity() {
             val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
             val widthColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.WIDTH)
             val heightColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.HEIGHT)
+            val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE)
             val takenColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
             val addedColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
             val modifiedColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_MODIFIED)
@@ -336,6 +339,7 @@ class MainActivity : Activity() {
                     width = cursor.getInt(widthColumn),
                     height = cursor.getInt(heightColumn),
                     liveVideoUri = videoPairs[livePairKey(name, path)],
+                    sizeBytes = cursor.safeLong(sizeColumn),
                     dateMillis = dateMillis,
                     bucketId = cursor.getString(bucketIdColumn).orEmpty(),
                     bucketName = cursor.getString(bucketNameColumn).orEmpty(),

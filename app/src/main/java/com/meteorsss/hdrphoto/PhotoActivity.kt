@@ -274,6 +274,7 @@ class PhotoActivity : Activity() {
         liveButton.text = "LIVE"
         liveVideoUri = null
         pendingVideoUri = null
+        scheduleLoadingIndicator(item, token)
         if (direction == 0) {
             imageView.setImageDrawable(null)
         } else {
@@ -286,13 +287,13 @@ class PhotoActivity : Activity() {
                 }
                 .start()
         }
-        loading.visibility = View.VISIBLE
 
         setupLivePhoto(item, token)
         executor.execute {
             val drawable = decodeDrawable(item.uri)
             mainHandler.post {
                 if (token != loadToken.get()) return@post
+                loading.tag = null
                 loading.visibility = View.GONE
                 if (drawable == null) {
                     finish()
@@ -315,6 +316,20 @@ class PhotoActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun scheduleLoadingIndicator(item: PhotoItem, token: Int) {
+        loading.tag = token
+        loading.visibility = View.GONE
+        val delay = if (item.sizeBytes >= LARGE_PHOTO_BYTES) 0L else LOADING_DELAY_MS
+        mainHandler.postDelayed(
+            {
+                if (loading.tag == token && token == loadToken.get()) {
+                    loading.visibility = View.VISIBLE
+                }
+            },
+            delay,
+        )
     }
 
     private fun setupLivePhoto(item: PhotoItem, token: Int) {
@@ -685,6 +700,8 @@ class PhotoActivity : Activity() {
     companion object {
         const val EXTRA_LIVE_VIDEO_URI = "com.meteorsss.hdrphoto.LIVE_VIDEO_URI"
         const val EXTRA_MOTION_PHOTO = "com.meteorsss.hdrphoto.MOTION_PHOTO"
+        private const val LARGE_PHOTO_BYTES = 20L * 1024L * 1024L
+        private const val LOADING_DELAY_MS = 450L
         private const val EXIF_DATETIME_ORIGINAL = "DateTimeOriginal"
         private const val EXIF_MAKE = "Make"
         private const val EXIF_MODEL = "Model"

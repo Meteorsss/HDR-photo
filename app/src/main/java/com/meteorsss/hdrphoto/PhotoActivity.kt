@@ -4,8 +4,10 @@ import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.graphics.ImageDecoder
+import android.graphics.SurfaceTexture
 import android.graphics.drawable.Drawable
 import android.media.ExifInterface
+import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -15,13 +17,14 @@ import android.provider.MediaStore
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.Surface
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.VideoView
 import java.text.DateFormat
 import java.util.Date
 import java.util.concurrent.Executors
@@ -33,13 +36,16 @@ class PhotoActivity : Activity() {
     private val loadToken = AtomicInteger(0)
     private lateinit var root: FrameLayout
     private lateinit var imageView: ZoomImageView
-    private lateinit var videoView: VideoView
+    private lateinit var videoView: TextureView
     private lateinit var loading: TextView
     private lateinit var liveButton: TextView
     private lateinit var detailsPanel: View
     private lateinit var detailsList: LinearLayout
     private var liveVideoUri: Uri? = null
     private var currentItem: PhotoItem? = null
+    private var mediaPlayer: MediaPlayer? = null
+    private var pendingVideoUri: Uri? = null
+    private var videoSurface: Surface? = null
 
     private val gestureDetector by lazy {
         GestureDetector(
@@ -57,7 +63,7 @@ class PhotoActivity : Activity() {
                     if (detailsPanel.visibility == View.VISIBLE) return false
 
                     if (kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > dp(90)) {
-                        if (!imageView.isZoomed() && videoView.visibility != View.VISIBLE) {
+                        if (!imageView.isZoomed() && mediaPlayer == null) {
                             if (dx < 0) showAdjacent(1) else showAdjacent(-1)
                             return true
                         }
@@ -98,7 +104,8 @@ class PhotoActivity : Activity() {
     }
 
     override fun onDestroy() {
-        videoView.stopPlayback()
+        stopVideo()
+        videoSurface?.release()
         executor.shutdownNow()
         super.onDestroy()
     }
@@ -112,9 +119,31 @@ class PhotoActivity : Activity() {
         }
         root.addView(imageView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
 
-        videoView = VideoView(this).apply {
-            setBackgroundColor(Color.BLACK)
-            visibility = View.GONE
+        videoView = TextureView(this).apply {
+            visibility = View.VISIBLE
+            alpha = 0f
+            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+                    videoSurface?.release()
+                    videoSurface = Surface(surfaceTexture)
+                    pendingVideoUri?.let { startVideo(it) }
+                }
+
+                override fun onSurfaceTextureSizeChanged(
+                    surfaceTexture: SurfaceTexture,
+                    width: Int,
+                    height: Int,
+                ) = Unit
+
+                override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
+                    stopVideo()
+                    videoSurface?.release()
+                    videoSurface = null
+                    return true
+                }
+
+                override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) = Unit
+            }
         }
         root.addView(videoView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
 
@@ -147,9 +176,9 @@ class PhotoActivity : Activity() {
             FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP or Gravity.END,
+                Gravity.BOTTOM or Gravity.END,
             ).apply {
-                setMargins(0, dp(18), dp(18), 0)
+                setMargins(0, 0, dp(18), dp(34))
             },
         )
 
@@ -233,6 +262,7 @@ class PhotoActivity : Activity() {
         liveButton.visibility = View.GONE
         liveButton.text = "LIVE"
         liveVideoUri = null
+        pendingVideoUri = null
         if (direction == 0) {
             imageView.setImageDrawable(null)
         } else {
@@ -310,31 +340,61 @@ class PhotoActivity : Activity() {
 
     private fun toggleLiveVideo() {
         val uri = liveVideoUri ?: return
-        if (videoView.visibility == View.VISIBLE) {
+        if (mediaPlayer != null) {
             stopVideo()
             return
         }
 
-        liveButton.text = "PHOTO"
-        videoView.setVideoURI(uri)
-        videoView.setOnPreparedListener { player ->
-            player.isLooping = false
-            imageView.visibility = View.GONE
-            videoView.visibility = View.VISIBLE
-            videoView.start()
+        pendingVideoUri = uri
+        liveButton.text = "..."
+        videoView.alpha = 0f
+        videoView.visibility = View.VISIBLE
+        if (videoView.isAvailable) {
+            startVideo(uri)
+        } else {
+            pendingVideoUri = uri
         }
-        videoView.setOnErrorListener { _, _, _ ->
-            stopVideo()
-            true
-        }
-        videoView.setOnCompletionListener {
+    }
+
+    private fun startVideo(uri: Uri) {
+        val surface = videoSurface ?: return
+        pendingVideoUri = null
+        mediaPlayer?.release()
+        runCatching {
+            mediaPlayer = MediaPlayer().apply {
+                if (uri.scheme == "file") {
+                    setDataSource(uri.path)
+                } else {
+                    setDataSource(this@PhotoActivity, uri)
+                }
+                setSurface(surface)
+                setOnPreparedListener { player ->
+                    player.isLooping = false
+                    liveButton.text = "PHOTO"
+                    imageView.visibility = View.GONE
+                    videoView.alpha = 1f
+                    player.start()
+                }
+                setOnErrorListener { _, _, _ ->
+                    stopVideo()
+                    true
+                }
+                setOnCompletionListener {
+                    stopVideo()
+                }
+                prepareAsync()
+            }
+        }.onFailure {
             stopVideo()
         }
     }
 
     private fun stopVideo() {
-        videoView.stopPlayback()
-        videoView.visibility = View.GONE
+        mediaPlayer?.release()
+        mediaPlayer = null
+        pendingVideoUri = null
+        videoView.alpha = 0f
+        videoView.visibility = View.VISIBLE
         imageView.visibility = View.VISIBLE
         if (liveVideoUri != null) liveButton.text = "LIVE"
     }

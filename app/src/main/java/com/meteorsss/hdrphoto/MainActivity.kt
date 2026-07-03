@@ -128,7 +128,7 @@ class MainActivity : Activity() {
             setPadding(dp(2), dp(2), dp(2), dp(8))
             onItemClickListener = android.widget.AdapterView.OnItemClickListener { _, _, position, _ ->
                 val item = photos[position]
-                this@MainActivity.adapter.prepareForOpen(item)
+                GallerySession.setPhotos(photos, position)
                 val intent = Intent(this@MainActivity, PhotoActivity::class.java).apply {
                     data = item.uri
                     item.liveVideoUri?.let {
@@ -414,18 +414,13 @@ class PhotoGridAdapter(
         holder.image.tag = key
         holder.hdrBadge.tag = key
         holder.liveBadge.tag = key
-        val cachedThumb = thumbCache[key] ?: PhotoPreviewCache.get(key)
-        holder.image.setImageBitmap(cachedThumb)
+        holder.image.setImageBitmap(thumbCache[key])
         holder.hdrBadge.visibility = if (hdrCache[key] == true) View.VISIBLE else View.GONE
         holder.liveBadge.visibility = if (isLivePhoto(item)) View.VISIBLE else View.GONE
         loadThumbnailIfNeeded(item, holder)
         detectHdrIfNeeded(item, holder)
         detectMotionPhotoIfNeeded(item, holder)
         return view
-    }
-
-    fun prepareForOpen(item: PhotoItem) {
-        thumbCache[item.uri.toString()]?.let { PhotoPreviewCache.put(item.uri.toString(), it) }
     }
 
     fun isMotionPhoto(item: PhotoItem): Boolean = motionPhotoCache[item.uri.toString()] == true
@@ -441,7 +436,6 @@ class PhotoGridAdapter(
 
             if (thumb != null) {
                 thumbCache[key] = thumb
-                PhotoPreviewCache.put(key, thumb)
                 mainHandler.post {
                     if (holder.image.tag == key) {
                         holder.image.setImageBitmap(thumb)

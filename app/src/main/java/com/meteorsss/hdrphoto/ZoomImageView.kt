@@ -123,6 +123,8 @@ class ZoomImageView(context: Context) : ImageView(context) {
         imageMatrix = photoMatrix
     }
 
+    fun isZoomed(): Boolean = currentScale > minScale * 1.05f
+
     private fun constrain() {
         val drawable = drawable ?: return
         val rect = RectF(

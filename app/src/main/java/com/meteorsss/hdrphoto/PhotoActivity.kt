@@ -88,7 +88,7 @@ class PhotoActivity : Activity() {
         } else {
             val uri = intent.data ?: return finish()
             currentItem = PhotoItem(0L, "", uri, 0, 0, intentLiveVideoUri())
-            loadCurrent()
+            loadCurrent(0)
         }
     }
 
@@ -212,20 +212,20 @@ class PhotoActivity : Activity() {
         return panel
     }
 
-    private fun loadAt(index: Int) {
+    private fun loadAt(index: Int, direction: Int = 0) {
         if (GallerySession.photos.isEmpty()) return
         GallerySession.setIndex(index)
         currentItem = GallerySession.photos[GallerySession.index]
-        loadCurrent()
+        loadCurrent(direction)
     }
 
     private fun showAdjacent(offset: Int) {
         val next = GallerySession.index + offset
         if (next !in GallerySession.photos.indices) return
-        loadAt(next)
+        loadAt(next, offset)
     }
 
-    private fun loadCurrent() {
+    private fun loadCurrent(direction: Int) {
         val item = currentItem ?: return
         val token = loadToken.incrementAndGet()
         stopVideo()
@@ -233,7 +233,18 @@ class PhotoActivity : Activity() {
         liveButton.visibility = View.GONE
         liveButton.text = "LIVE"
         liveVideoUri = null
-        imageView.setImageDrawable(null)
+        if (direction == 0) {
+            imageView.setImageDrawable(null)
+        } else {
+            imageView.animate()
+                .translationX(-direction * widthOrScreen() * 0.16f)
+                .alpha(0f)
+                .setDuration(120L)
+                .withEndAction {
+                    if (token == loadToken.get()) imageView.setImageDrawable(null)
+                }
+                .start()
+        }
         loading.visibility = View.VISIBLE
 
         setupLivePhoto(item, token)
@@ -245,7 +256,21 @@ class PhotoActivity : Activity() {
                 if (drawable == null) {
                     finish()
                 } else {
+                    if (direction != 0) {
+                        imageView.translationX = direction * widthOrScreen() * 0.18f
+                        imageView.alpha = 0f
+                    }
                     imageView.setImageDrawable(drawable)
+                    if (direction != 0) {
+                        imageView.animate()
+                            .translationX(0f)
+                            .alpha(1f)
+                            .setDuration(180L)
+                            .start()
+                    } else {
+                        imageView.translationX = 0f
+                        imageView.alpha = 1f
+                    }
                 }
             }
         }
@@ -290,12 +315,12 @@ class PhotoActivity : Activity() {
             return
         }
 
-        imageView.visibility = View.GONE
-        videoView.visibility = View.VISIBLE
         liveButton.text = "PHOTO"
         videoView.setVideoURI(uri)
         videoView.setOnPreparedListener { player ->
             player.isLooping = false
+            imageView.visibility = View.GONE
+            videoView.visibility = View.VISIBLE
             videoView.start()
         }
         videoView.setOnErrorListener { _, _, _ ->
@@ -483,6 +508,8 @@ class PhotoActivity : Activity() {
         if (millis == null || millis <= 0L) return ""
         return DateFormat.getDateTimeInstance().format(Date(millis))
     }
+
+    private fun widthOrScreen(): Int = if (root.width > 0) root.width else resources.displayMetrics.widthPixels
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 

@@ -9,10 +9,9 @@ object MotionPhotoSupport {
     private val markers = listOf(
         "MotionPhoto",
         "MicroVideo",
-        "GCamera",
         "Camera:MotionPhoto",
         "MotionPhoto_Data",
-        "Container:Directory",
+        "video/mp4",
     )
     private val ftyp = byteArrayOf(0x66, 0x74, 0x79, 0x70)
 
@@ -35,7 +34,7 @@ object MotionPhotoSupport {
         return runCatching {
             val outputDir = File(context.cacheDir, "motion-photo").apply { mkdirs() }
             val output = File(outputDir, "${Integer.toHexString(uri.toString().hashCode())}.mp4")
-            if (output.length() > 32) return Uri.fromFile(output)
+            if (output.exists()) output.delete()
 
             val start = findMp4Start(context, uri) ?: return null
             context.contentResolver.openInputStream(uri)?.use { input ->

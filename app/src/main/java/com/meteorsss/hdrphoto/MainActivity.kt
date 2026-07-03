@@ -266,7 +266,7 @@ class MainActivity : Activity() {
             while (cursor.moveToNext()) {
                 val name = cursor.getString(nameColumn).orEmpty()
                 val extension = name.substringAfterLast('.', "").lowercase()
-                if (extension !in setOf("mov", "mp4", "3gp")) continue
+                if (extension != "mov") continue
                 val id = cursor.getLong(idColumn)
                 val path = cursor.getString(pathColumn).orEmpty()
                 pairs[livePairKey(name, path)] = ContentUris.withAppendedId(collection, id)

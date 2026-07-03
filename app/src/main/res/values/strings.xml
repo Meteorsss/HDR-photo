@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">HDR Photo</string>
+    <string name="grant_access">授权读取图片</string>
+    <string name="permission_needed">需要图片读取权限才能浏览相册</string>
+    <string name="refresh">刷新</string>
+    <string name="loading">载入中...</string>
+    <string name="empty_gallery">没有找到图片</string>
+</resources>

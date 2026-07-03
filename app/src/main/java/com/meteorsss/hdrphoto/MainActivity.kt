@@ -38,6 +38,7 @@ data class PhotoItem(
     val uri: Uri,
     val width: Int,
     val height: Int,
+    val liveVideoUri: Uri?,
 )
 
 class MainActivity : Activity() {
@@ -127,8 +128,13 @@ class MainActivity : Activity() {
             setPadding(dp(2), dp(2), dp(2), dp(8))
             onItemClickListener = android.widget.AdapterView.OnItemClickListener { _, _, position, _ ->
                 val item = photos[position]
+                adapter.prepareForOpen(item)
                 val intent = Intent(this@MainActivity, PhotoActivity::class.java).apply {
                     data = item.uri
+                    item.liveVideoUri?.let {
+                        putExtra(PhotoActivity.EXTRA_LIVE_VIDEO_URI, it.toString())
+                    }
+                    putExtra(PhotoActivity.EXTRA_MOTION_PHOTO, adapter.isMotionPhoto(item))
                 }
                 startActivity(intent)
             }
@@ -187,40 +193,105 @@ class MainActivity : Activity() {
 
     private fun queryImages(): List<PhotoItem> {
         val result = mutableListOf<PhotoItem>()
+        val videoPairs = queryVideoPairs()
         val collection = if (Build.VERSION.SDK_INT >= 29) {
             MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         } else {
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         }
-        val projection = arrayOf(
+        val projection = mutableListOf(
             MediaStore.Images.Media._ID,
             MediaStore.Images.Media.DISPLAY_NAME,
             MediaStore.Images.Media.WIDTH,
             MediaStore.Images.Media.HEIGHT,
         )
+        if (Build.VERSION.SDK_INT >= 29) {
+            projection += MediaStore.Images.Media.RELATIVE_PATH
+        } else {
+            projection += MediaStore.Images.Media.DATA
+        }
         val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
-        contentResolver.query(collection, projection, null, null, sortOrder)?.use { cursor ->
+        contentResolver.query(collection, projection.toTypedArray(), null, null, sortOrder)?.use { cursor ->
             val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
             val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
             val widthColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.WIDTH)
             val heightColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.HEIGHT)
+            val pathColumn = if (Build.VERSION.SDK_INT >= 29) {
+                cursor.getColumnIndexOrThrow(MediaStore.Images.Media.RELATIVE_PATH)
+            } else {
+                cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
+            }
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idColumn)
+                val name = cursor.getString(nameColumn).orEmpty()
+                val path = cursor.getString(pathColumn).orEmpty()
                 result += PhotoItem(
                     id = id,
-                    name = cursor.getString(nameColumn).orEmpty(),
+                    name = name,
                     uri = ContentUris.withAppendedId(collection, id),
                     width = cursor.getInt(widthColumn),
                     height = cursor.getInt(heightColumn),
+                    liveVideoUri = videoPairs[livePairKey(name, path)],
                 )
             }
         }
         return result
     }
 
+    private fun queryVideoPairs(): Map<String, Uri> {
+        if (!hasVideoAccess()) return emptyMap()
+        val pairs = mutableMapOf<String, Uri>()
+        val collection = if (Build.VERSION.SDK_INT >= 29) {
+            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        } else {
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        }
+        val projection = mutableListOf(
+            MediaStore.Video.Media._ID,
+            MediaStore.Video.Media.DISPLAY_NAME,
+        )
+        if (Build.VERSION.SDK_INT >= 29) {
+            projection += MediaStore.Video.Media.RELATIVE_PATH
+        } else {
+            projection += MediaStore.Video.Media.DATA
+        }
+        contentResolver.query(collection, projection.toTypedArray(), null, null, null)?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
+            val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
+            val pathColumn = if (Build.VERSION.SDK_INT >= 29) {
+                cursor.getColumnIndexOrThrow(MediaStore.Video.Media.RELATIVE_PATH)
+            } else {
+                cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATA)
+            }
+            while (cursor.moveToNext()) {
+                val name = cursor.getString(nameColumn).orEmpty()
+                val extension = name.substringAfterLast('.', "").lowercase()
+                if (extension !in setOf("mov", "mp4", "3gp")) continue
+                val id = cursor.getLong(idColumn)
+                val path = cursor.getString(pathColumn).orEmpty()
+                pairs[livePairKey(name, path)] = ContentUris.withAppendedId(collection, id)
+            }
+        }
+        return pairs
+    }
+
     private fun hasImageAccess(): Boolean {
         return if (Build.VERSION.SDK_INT >= 33) {
-            checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED ||
+            val hasImages = checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES) ==
+                PackageManager.PERMISSION_GRANTED
+            val hasVideos = hasVideoAccess()
+            (hasImages && hasVideos) ||
+                (Build.VERSION.SDK_INT >= 34 &&
+                    checkSelfPermission(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) ==
+                    PackageManager.PERMISSION_GRANTED)
+        } else {
+            checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun hasVideoAccess(): Boolean {
+        return if (Build.VERSION.SDK_INT >= 33) {
+            checkSelfPermission(Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED ||
                 (Build.VERSION.SDK_INT >= 34 &&
                     checkSelfPermission(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) ==
                     PackageManager.PERMISSION_GRANTED)
@@ -233,9 +304,13 @@ class MainActivity : Activity() {
         val permissions = when {
             Build.VERSION.SDK_INT >= 34 -> arrayOf(
                 Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
                 Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
             )
-            Build.VERSION.SDK_INT >= 33 -> arrayOf(Manifest.permission.READ_MEDIA_IMAGES)
+            Build.VERSION.SDK_INT >= 33 -> arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+            )
             else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
         requestPermissions(permissions, REQUEST_IMAGES)
@@ -248,6 +323,16 @@ class MainActivity : Activity() {
     }
 }
 
+private fun livePairKey(name: String, path: String): String {
+    val folder = if (Build.VERSION.SDK_INT >= 29) {
+        path
+    } else {
+        path.substringBeforeLast('/', "")
+    }
+    val stem = name.substringBeforeLast('.', name)
+    return "${folder.lowercase()}|${stem.lowercase()}"
+}
+
 class PhotoGridAdapter(
     private val activity: Activity,
     private val photos: List<PhotoItem>,
@@ -256,8 +341,10 @@ class PhotoGridAdapter(
 ) : BaseAdapter() {
     private val thumbCache = ConcurrentHashMap<String, Bitmap>()
     private val hdrCache = ConcurrentHashMap<String, Boolean>()
+    private val motionPhotoCache = ConcurrentHashMap<String, Boolean>()
     private val thumbLoading = ConcurrentHashMap.newKeySet<String>()
     private val hdrLoading = ConcurrentHashMap.newKeySet<String>()
+    private val motionPhotoLoading = ConcurrentHashMap.newKeySet<String>()
 
     override fun getCount(): Int = photos.size
     override fun getItem(position: Int): PhotoItem = photos[position]
@@ -279,7 +366,7 @@ class PhotoGridAdapter(
             }
             frame.addView(image, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
 
-            val badge = TextView(activity).apply {
+            val hdrBadge = TextView(activity).apply {
                 text = "HDR"
                 textSize = 12f
                 typeface = android.graphics.Typeface.DEFAULT
@@ -295,8 +382,26 @@ class PhotoGridAdapter(
             ).apply {
                 setMargins(0, activity.dp(6), activity.dp(6), 0)
             }
-            frame.addView(badge, badgeParams)
-            holder = Holder(image, badge)
+            frame.addView(hdrBadge, badgeParams)
+
+            val liveBadge = TextView(activity).apply {
+                text = "LIVE"
+                textSize = 12f
+                typeface = android.graphics.Typeface.DEFAULT
+                setTextColor(Color.rgb(58, 58, 58))
+                setBackgroundResource(R.drawable.badge_hdr)
+                setPadding(activity.dp(7), activity.dp(3), activity.dp(7), activity.dp(3))
+                visibility = View.GONE
+            }
+            val liveParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.START,
+            ).apply {
+                setMargins(activity.dp(6), activity.dp(6), 0, 0)
+            }
+            frame.addView(liveBadge, liveParams)
+            holder = Holder(image, hdrBadge, liveBadge)
             frame.tag = holder
             frame
         } else {
@@ -307,13 +412,23 @@ class PhotoGridAdapter(
         val item = photos[position]
         val key = item.uri.toString()
         holder.image.tag = key
-        holder.badge.tag = key
-        holder.image.setImageBitmap(thumbCache[key])
-        holder.badge.visibility = if (hdrCache[key] == true) View.VISIBLE else View.GONE
+        holder.hdrBadge.tag = key
+        holder.liveBadge.tag = key
+        val cachedThumb = thumbCache[key] ?: PhotoPreviewCache.get(key)
+        holder.image.setImageBitmap(cachedThumb)
+        holder.hdrBadge.visibility = if (hdrCache[key] == true) View.VISIBLE else View.GONE
+        holder.liveBadge.visibility = if (isLivePhoto(item)) View.VISIBLE else View.GONE
         loadThumbnailIfNeeded(item, holder)
         detectHdrIfNeeded(item, holder)
+        detectMotionPhotoIfNeeded(item, holder)
         return view
     }
+
+    fun prepareForOpen(item: PhotoItem) {
+        thumbCache[item.uri.toString()]?.let { PhotoPreviewCache.put(item.uri.toString(), it) }
+    }
+
+    fun isMotionPhoto(item: PhotoItem): Boolean = motionPhotoCache[item.uri.toString()] == true
 
     private fun loadThumbnailIfNeeded(item: PhotoItem, holder: Holder) {
         val key = item.uri.toString()
@@ -326,6 +441,7 @@ class PhotoGridAdapter(
 
             if (thumb != null) {
                 thumbCache[key] = thumb
+                PhotoPreviewCache.put(key, thumb)
                 mainHandler.post {
                     if (holder.image.tag == key) {
                         holder.image.setImageBitmap(thumb)
@@ -344,11 +460,28 @@ class PhotoGridAdapter(
             val isHdr = isUltraHdr(item.uri)
             hdrCache[key] = isHdr
             mainHandler.post {
-                if (holder.badge.tag == key) {
-                    holder.badge.visibility = if (isHdr) View.VISIBLE else View.GONE
+                if (holder.hdrBadge.tag == key) {
+                    holder.hdrBadge.visibility = if (isHdr) View.VISIBLE else View.GONE
                 }
             }
             hdrLoading.remove(key)
+        }
+    }
+
+    private fun detectMotionPhotoIfNeeded(item: PhotoItem, holder: Holder) {
+        if (item.liveVideoUri != null) return
+        val key = item.uri.toString()
+        if (motionPhotoCache.containsKey(key) || !motionPhotoLoading.add(key)) return
+
+        executor.execute {
+            val isMotionPhoto = MotionPhotoSupport.hasMotionPhotoMetadata(activity, item.uri)
+            motionPhotoCache[key] = isMotionPhoto
+            mainHandler.post {
+                if (holder.liveBadge.tag == key) {
+                    holder.liveBadge.visibility = if (isMotionPhoto) View.VISIBLE else View.GONE
+                }
+            }
+            motionPhotoLoading.remove(key)
         }
     }
 
@@ -366,9 +499,14 @@ class PhotoGridAdapter(
         }.getOrDefault(false)
     }
 
+    private fun isLivePhoto(item: PhotoItem): Boolean {
+        return item.liveVideoUri != null || motionPhotoCache[item.uri.toString()] == true
+    }
+
     private data class Holder(
         val image: ImageView,
-        val badge: TextView,
+        val hdrBadge: TextView,
+        val liveBadge: TextView,
     )
 }
 

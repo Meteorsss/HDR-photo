@@ -281,11 +281,11 @@ class PhotoGridAdapter(
 
             val badge = TextView(activity).apply {
                 text = "HDR"
-                textSize = 11f
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-                setTextColor(Color.rgb(25, 22, 5))
+                textSize = 12f
+                typeface = android.graphics.Typeface.DEFAULT
+                setTextColor(Color.rgb(58, 58, 58))
                 setBackgroundResource(R.drawable.badge_hdr)
-                setPadding(activity.dp(6), activity.dp(2), activity.dp(6), activity.dp(2))
+                setPadding(activity.dp(7), activity.dp(3), activity.dp(7), activity.dp(3))
                 visibility = View.GONE
             }
             val badgeParams = FrameLayout.LayoutParams(

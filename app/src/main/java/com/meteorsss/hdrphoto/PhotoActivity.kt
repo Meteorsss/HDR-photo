@@ -4,9 +4,11 @@ import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.graphics.ImageDecoder
+import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.graphics.drawable.Drawable
 import android.media.ExifInterface
+import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
@@ -29,6 +31,7 @@ import java.text.DateFormat
 import java.util.Date
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.min
 
 class PhotoActivity : Activity() {
     private val executor = Executors.newFixedThreadPool(2)
@@ -46,6 +49,9 @@ class PhotoActivity : Activity() {
     private var mediaPlayer: MediaPlayer? = null
     private var pendingVideoUri: Uri? = null
     private var videoSurface: Surface? = null
+    private var lastVideoWidth = 0
+    private var lastVideoHeight = 0
+    private var lastVideoRotation = 0
 
     private val gestureDetector by lazy {
         GestureDetector(
@@ -133,7 +139,9 @@ class PhotoActivity : Activity() {
                     surfaceTexture: SurfaceTexture,
                     width: Int,
                     height: Int,
-                ) = Unit
+                ) {
+                    applyVideoFitTransform(lastVideoWidth, lastVideoHeight, lastVideoRotation)
+                }
 
                 override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
                     stopVideo()
@@ -361,15 +369,20 @@ class PhotoActivity : Activity() {
         pendingVideoUri = null
         mediaPlayer?.release()
         runCatching {
+            val rotation = readVideoRotation(uri)
             mediaPlayer = MediaPlayer().apply {
                 if (uri.scheme == "file") {
-                    setDataSource(uri.path)
+                    setDataSource(uri.path ?: throw IllegalArgumentException("Missing video path"))
                 } else {
                     setDataSource(this@PhotoActivity, uri)
                 }
                 setSurface(surface)
                 setOnPreparedListener { player ->
                     player.isLooping = false
+                    lastVideoWidth = player.videoWidth
+                    lastVideoHeight = player.videoHeight
+                    lastVideoRotation = rotation
+                    applyVideoFitTransform(lastVideoWidth, lastVideoHeight, lastVideoRotation)
                     liveButton.text = "PHOTO"
                     imageView.visibility = View.GONE
                     videoView.alpha = 1f
@@ -393,10 +406,51 @@ class PhotoActivity : Activity() {
         mediaPlayer?.release()
         mediaPlayer = null
         pendingVideoUri = null
+        lastVideoWidth = 0
+        lastVideoHeight = 0
+        lastVideoRotation = 0
+        videoView.setTransform(Matrix())
         videoView.alpha = 0f
         videoView.visibility = View.VISIBLE
         imageView.visibility = View.VISIBLE
         if (liveVideoUri != null) liveButton.text = "LIVE"
+    }
+
+    private fun applyVideoFitTransform(videoWidth: Int, videoHeight: Int, rotation: Int) {
+        val viewWidth = videoView.width.toFloat()
+        val viewHeight = videoView.height.toFloat()
+        if (videoWidth <= 0 || videoHeight <= 0 || viewWidth <= 0f || viewHeight <= 0f) return
+
+        val rotated = rotation == 90 || rotation == 270
+        val displayWidth = if (rotated) videoHeight.toFloat() else videoWidth.toFloat()
+        val displayHeight = if (rotated) videoWidth.toFloat() else videoHeight.toFloat()
+        val scale = min(viewWidth / displayWidth, viewHeight / displayHeight)
+        val scaleX = displayWidth * scale / viewWidth
+        val scaleY = displayHeight * scale / viewHeight
+
+        videoView.setTransform(
+            Matrix().apply {
+                setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f)
+            },
+        )
+    }
+
+    private fun readVideoRotation(uri: Uri): Int {
+        val retriever = MediaMetadataRetriever()
+        return try {
+                if (uri.scheme == "file") {
+                    retriever.setDataSource(uri.path ?: return 0)
+                } else {
+                    retriever.setDataSource(this, uri)
+                }
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                    ?.toIntOrNull()
+                    ?: 0
+        } catch (_: Exception) {
+            0
+        } finally {
+            retriever.release()
+        }
     }
 
     private fun showDetails() {

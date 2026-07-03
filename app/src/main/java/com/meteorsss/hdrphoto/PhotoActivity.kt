@@ -357,30 +357,33 @@ class PhotoActivity : Activity() {
 
     private fun readDetails(uri: Uri): List<Pair<String, String>> {
         val rows = mutableListOf<Pair<String, String>>()
+        fun putDetail(label: String, value: String?) {
+            if (!value.isNullOrBlank()) rows.add(label to value)
+        }
         val media = queryMediaDetails(uri)
         val exif = readExif(uri)
         val name = media["name"] ?: uri.lastPathSegment.orEmpty()
-        rows += "文件名" to name
-        rows += "位置" to uri.toString()
-        rows += "大小" to formatBytes(media["size"]?.toLongOrNull())
-        rows += "格式" to (media["mime"] ?: name.substringAfterLast('.', "未知").uppercase())
-        rows += "像素" to listOfNotNull(media["width"], media["height"]).joinToString(" x ")
-        rows += "拍摄时间" to (exif[EXIF_DATETIME_ORIGINAL] ?: formatMillis(media["dateTaken"]?.toLongOrNull()))
-        rows += "添加时间" to formatSeconds(media["dateAdded"]?.toLongOrNull())
-        rows += "修改时间" to formatSeconds(media["dateModified"]?.toLongOrNull())
+        putDetail("文件名", name)
+        putDetail("位置", uri.toString())
+        putDetail("大小", formatBytes(media["size"]?.toLongOrNull()))
+        putDetail("格式", media["mime"] ?: name.substringAfterLast('.', "未知").uppercase())
+        putDetail("像素", listOfNotNull(media["width"], media["height"]).joinToString(" x "))
+        putDetail("拍摄时间", exif[EXIF_DATETIME_ORIGINAL] ?: formatMillis(media["dateTaken"]?.toLongOrNull()))
+        putDetail("添加时间", formatSeconds(media["dateAdded"]?.toLongOrNull()))
+        putDetail("修改时间", formatSeconds(media["dateModified"]?.toLongOrNull()))
 
-        exif["GPS"]?.let { rows += "GPS" to it }
-        rows += "设备" to listOfNotNull(exif[EXIF_MAKE], exif[EXIF_MODEL]).joinToString(" ")
-        rows += "光圈" to exif[EXIF_F_NUMBER]?.let { "f/$it" }
-        rows += "焦距" to exif[EXIF_FOCAL_LENGTH]?.let { "$it mm" }
-        rows += "曝光时间" to exif[EXIF_EXPOSURE_TIME]
-        rows += "ISO" to (exif[EXIF_PHOTOGRAPHIC_SENSITIVITY] ?: exif[EXIF_ISO_SPEED_RATINGS])
-        rows += "白平衡" to exif[EXIF_WHITE_BALANCE]?.let { if (it == "0") "自动" else "手动" }
-        rows += "闪光灯" to exif[EXIF_FLASH]
-        rows += "曝光补偿" to exif[EXIF_EXPOSURE_BIAS_VALUE]
-        rows += "测光模式" to exif[EXIF_METERING_MODE]
-        rows += "软件" to exif[EXIF_SOFTWARE]
-        return rows.filter { it.second.isNotBlank() }
+        putDetail("GPS", exif["GPS"])
+        putDetail("设备", listOfNotNull(exif[EXIF_MAKE], exif[EXIF_MODEL]).joinToString(" "))
+        putDetail("光圈", exif[EXIF_F_NUMBER]?.let { "f/$it" })
+        putDetail("焦距", exif[EXIF_FOCAL_LENGTH]?.let { "$it mm" })
+        putDetail("曝光时间", exif[EXIF_EXPOSURE_TIME])
+        putDetail("ISO", exif[EXIF_PHOTOGRAPHIC_SENSITIVITY] ?: exif[EXIF_ISO_SPEED_RATINGS])
+        putDetail("白平衡", exif[EXIF_WHITE_BALANCE]?.let { if (it == "0") "自动" else "手动" })
+        putDetail("闪光灯", exif[EXIF_FLASH])
+        putDetail("曝光补偿", exif[EXIF_EXPOSURE_BIAS_VALUE])
+        putDetail("测光模式", exif[EXIF_METERING_MODE])
+        putDetail("软件", exif[EXIF_SOFTWARE])
+        return rows
     }
 
     private fun queryMediaDetails(uri: Uri): Map<String, String> {

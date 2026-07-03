@@ -1,7 +1,9 @@
 package com.meteorsss.hdrphoto
 
+import android.Manifest
 import android.app.Activity
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.ImageDecoder
 import android.graphics.Matrix
@@ -29,6 +31,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import java.text.DateFormat
 import java.util.Date
+import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
@@ -438,14 +441,14 @@ class PhotoActivity : Activity() {
     private fun readVideoRotation(uri: Uri): Int {
         val retriever = MediaMetadataRetriever()
         return try {
-                if (uri.scheme == "file") {
-                    retriever.setDataSource(uri.path ?: return 0)
-                } else {
-                    retriever.setDataSource(this, uri)
-                }
-                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
-                    ?.toIntOrNull()
-                    ?: 0
+            if (uri.scheme == "file") {
+                retriever.setDataSource(uri.path ?: return 0)
+            } else {
+                retriever.setDataSource(this, uri)
+            }
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                ?.toIntOrNull()
+                ?: 0
         } catch (_: Exception) {
             0
         } finally {
@@ -558,7 +561,7 @@ class PhotoActivity : Activity() {
 
     private fun readExif(uri: Uri): Map<String, String> {
         return runCatching {
-            contentResolver.openInputStream(uri)?.use { input ->
+            openExifInputStream(uri)?.use { input ->
                 val exif = ExifInterface(input)
                 val values = mutableMapOf<String, String>()
                 val tags = listOf(
@@ -579,13 +582,65 @@ class PhotoActivity : Activity() {
                 tags.forEach { tag ->
                     exif.getAttribute(tag)?.let { values[tag] = it }
                 }
-                val latLong = FloatArray(2)
-                if (exif.getLatLong(latLong)) {
-                    values["GPS"] = "${latLong[0]}, ${latLong[1]}"
-                }
+                gpsString(exif)?.let { values["GPS"] = it }
                 values
             } ?: emptyMap()
         }.getOrDefault(emptyMap())
+    }
+
+    private fun openExifInputStream(uri: Uri): java.io.InputStream? {
+        val exifUri = originalMediaUri(uri)
+        return runCatching {
+            contentResolver.openInputStream(exifUri)
+        }.getOrNull() ?: runCatching {
+            contentResolver.openInputStream(uri)
+        }.getOrNull()
+    }
+
+    private fun originalMediaUri(uri: Uri): Uri {
+        return if (Build.VERSION.SDK_INT >= 29 && hasMediaLocationAccess()) {
+            runCatching { MediaStore.setRequireOriginal(uri) }.getOrDefault(uri)
+        } else {
+            uri
+        }
+    }
+
+    private fun hasMediaLocationAccess(): Boolean {
+        return Build.VERSION.SDK_INT < 29 ||
+            checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun gpsString(exif: ExifInterface): String? {
+        val latLong = FloatArray(2)
+        if (exif.getLatLong(latLong) && (latLong[0] != 0f || latLong[1] != 0f)) {
+            return String.format(Locale.US, "%.6f, %.6f", latLong[0], latLong[1])
+        }
+        val lat = parseGpsCoordinate(exif.getAttribute("GPSLatitude"), exif.getAttribute("GPSLatitudeRef"))
+        val lon = parseGpsCoordinate(exif.getAttribute("GPSLongitude"), exif.getAttribute("GPSLongitudeRef"))
+        return if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
+            String.format(Locale.US, "%.6f, %.6f", lat, lon)
+        } else {
+            null
+        }
+    }
+
+    private fun parseGpsCoordinate(value: String?, ref: String?): Double? {
+        if (value.isNullOrBlank()) return null
+        val parts = value.split(",")
+        if (parts.size < 3) return null
+        val degrees = parseRational(parts[0]) ?: return null
+        val minutes = parseRational(parts[1]) ?: return null
+        val seconds = parseRational(parts[2]) ?: return null
+        val sign = if (ref == "S" || ref == "W") -1.0 else 1.0
+        return sign * (degrees + minutes / 60.0 + seconds / 3600.0)
+    }
+
+    private fun parseRational(value: String): Double? {
+        val trimmed = value.trim()
+        val numerator = trimmed.substringBefore("/", trimmed).toDoubleOrNull() ?: return null
+        val denominator = trimmed.substringAfter("/", "1").toDoubleOrNull() ?: return null
+        if (denominator == 0.0) return null
+        return numerator / denominator
     }
 
     private fun android.database.Cursor.stringValue(column: String): String {
@@ -610,7 +665,7 @@ class PhotoActivity : Activity() {
     private fun formatBytes(size: Long?): String {
         if (size == null || size <= 0L) return ""
         val mb = size / 1024.0 / 1024.0
-        return String.format("%.2f MB", mb)
+        return String.format(Locale.US, "%.2f MB", mb)
     }
 
     private fun formatSeconds(seconds: Long?): String {

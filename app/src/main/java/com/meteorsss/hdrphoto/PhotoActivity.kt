@@ -4,10 +4,12 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.media.ExifInterface
 import android.media.MediaMetadataRetriever
@@ -665,16 +667,63 @@ class PhotoActivity : Activity() {
     }
 
     private fun decodeDrawable(uri: Uri): Drawable? {
+        return if (Build.VERSION.SDK_INT >= 28) {
+            decodeWithImageDecoder(uri)
+        } else {
+            decodeWithBitmapFactory(uri)
+        }
+    }
+
+    private fun decodeWithImageDecoder(uri: Uri): Drawable? {
         return runCatching {
-            if (Build.VERSION.SDK_INT >= 28) {
-                val source = ImageDecoder.createSource(contentResolver, uri)
-                ImageDecoder.decodeDrawable(source) { decoder, _, _ ->
+            val source = ImageDecoder.createSource(contentResolver, uri)
+            ImageDecoder.decodeDrawable(source) { decoder, info, _ ->
+                val sample = sampleSizeFor(info.size.width, info.size.height)
+                if (sample > 1) {
+                    decoder.setTargetSampleSize(sample)
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                } else {
                     decoder.allocator = ImageDecoder.ALLOCATOR_HARDWARE
                 }
-            } else {
-                contentResolver.openInputStream(uri)?.use { Drawable.createFromStream(it, uri.toString()) }
+            }
+        }.getOrElse {
+            decodeSoftwareWithImageDecoder(uri)
+        }
+    }
+
+    private fun decodeSoftwareWithImageDecoder(uri: Uri): Drawable? {
+        if (Build.VERSION.SDK_INT < 28) return null
+        return runCatching {
+            val source = ImageDecoder.createSource(contentResolver, uri)
+            ImageDecoder.decodeDrawable(source) { decoder, info, _ ->
+                decoder.setTargetSampleSize(sampleSizeFor(info.size.width, info.size.height))
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
             }
         }.getOrNull()
+    }
+
+    private fun decodeWithBitmapFactory(uri: Uri): Drawable? {
+        return runCatching {
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            contentResolver.openInputStream(uri)?.use { input ->
+                BitmapFactory.decodeStream(input, null, options)
+            }
+            val sample = sampleSizeFor(options.outWidth, options.outHeight)
+            val bitmap = contentResolver.openInputStream(uri)?.use { input ->
+                BitmapFactory.decodeStream(
+                    input,
+                    null,
+                    BitmapFactory.Options().apply { inSampleSize = sample },
+                )
+            }
+            bitmap?.let { BitmapDrawable(resources, it) }
+        }.getOrNull()
+    }
+
+    private fun sampleSizeFor(width: Int, height: Int): Int {
+        val longest = maxOf(width, height)
+        if (longest <= MAX_DECODE_DIMENSION || longest <= 0) return 1
+        return ((longest + MAX_DECODE_DIMENSION - 1) / MAX_DECODE_DIMENSION).coerceAtLeast(1)
     }
 
     private fun formatBytes(size: Long?): String {
@@ -702,6 +751,7 @@ class PhotoActivity : Activity() {
         const val EXTRA_MOTION_PHOTO = "com.meteorsss.hdrphoto.MOTION_PHOTO"
         private const val LARGE_PHOTO_BYTES = 20L * 1024L * 1024L
         private const val LOADING_DELAY_MS = 450L
+        private const val MAX_DECODE_DIMENSION = 16_000
         private const val EXIF_DATETIME_ORIGINAL = "DateTimeOriginal"
         private const val EXIF_MAKE = "Make"
         private const val EXIF_MODEL = "Model"

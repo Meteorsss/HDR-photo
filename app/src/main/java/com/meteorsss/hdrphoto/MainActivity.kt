@@ -128,13 +128,13 @@ class MainActivity : Activity() {
             setPadding(dp(2), dp(2), dp(2), dp(8))
             onItemClickListener = android.widget.AdapterView.OnItemClickListener { _, _, position, _ ->
                 val item = photos[position]
-                adapter.prepareForOpen(item)
+                this@MainActivity.adapter.prepareForOpen(item)
                 val intent = Intent(this@MainActivity, PhotoActivity::class.java).apply {
                     data = item.uri
                     item.liveVideoUri?.let {
                         putExtra(PhotoActivity.EXTRA_LIVE_VIDEO_URI, it.toString())
                     }
-                    putExtra(PhotoActivity.EXTRA_MOTION_PHOTO, adapter.isMotionPhoto(item))
+                    putExtra(PhotoActivity.EXTRA_MOTION_PHOTO, this@MainActivity.adapter.isMotionPhoto(item))
                 }
                 startActivity(intent)
             }

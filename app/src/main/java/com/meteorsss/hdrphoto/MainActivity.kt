@@ -11,6 +11,7 @@ import android.graphics.Color
 import android.graphics.ImageDecoder
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -120,9 +121,12 @@ class MainActivity : Activity() {
             showPhotos(album)
         }
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        val root = FrameLayout(this).apply {
             background = appBackground()
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.TRANSPARENT)
         }
 
         val toolbar = LinearLayout(this).apply {
@@ -169,16 +173,17 @@ class MainActivity : Activity() {
             divider = null
             cacheColorHint = Color.TRANSPARENT
             clipToPadding = false
-            setPadding(dp(2), dp(4), dp(2), dp(8))
+            setPadding(dp(2), dp(4), dp(2), dp(104))
             adapter = photoAdapter
         }
 
         val bottomNav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-            background = glassBackground(dp(30), Color.argb(205, 255, 255, 255))
-            elevation = dp(10).toFloat()
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            background = liquidGlassNavBackground()
+            elevation = dp(18).toFloat()
+            clipToOutline = true
         }
         photoNav = buildNavItem("照片") {
             showPhotos(null)
@@ -189,7 +194,7 @@ class MainActivity : Activity() {
         bottomNav.addView(photoNav, LinearLayout.LayoutParams(0, dp(58), 1f))
         bottomNav.addView(albumNav, LinearLayout.LayoutParams(0, dp(58), 1f))
 
-        root.addView(
+        content.addView(
             toolbar,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -198,14 +203,22 @@ class MainActivity : Activity() {
                 setMargins(dp(12), dp(10), dp(12), dp(4))
             },
         )
-        root.addView(listView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        content.addView(listView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(
+            content,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
         root.addView(
             bottomNav,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                dp(70),
+                Gravity.BOTTOM,
             ).apply {
-                setMargins(dp(18), dp(4), dp(18), dp(12))
+                setMargins(dp(22), 0, dp(22), dp(18))
             },
         )
         setContentView(root)
@@ -502,10 +515,44 @@ class MainActivity : Activity() {
     private fun selectedNavBackground(): GradientDrawable {
         return GradientDrawable(
             GradientDrawable.Orientation.LEFT_RIGHT,
-            intArrayOf(Color.argb(46, 67, 133, 245), Color.argb(30, 33, 190, 214)),
+            intArrayOf(Color.argb(64, 72, 142, 255), Color.argb(42, 42, 205, 225)),
         ).apply {
             cornerRadius = dp(22).toFloat()
-            setStroke(dp(1), Color.argb(105, 255, 255, 255))
+            setStroke(dp(1), Color.argb(150, 255, 255, 255))
+        }
+    }
+
+    private fun liquidGlassNavBackground(): LayerDrawable {
+        val base = GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(
+                Color.argb(156, 255, 255, 255),
+                Color.argb(92, 246, 251, 255),
+                Color.argb(118, 230, 240, 250),
+            ),
+        ).apply {
+            cornerRadius = dp(34).toFloat()
+            setStroke(dp(1), Color.argb(190, 255, 255, 255))
+        }
+        val topSheen = GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(Color.argb(152, 255, 255, 255), Color.argb(18, 255, 255, 255)),
+        ).apply {
+            cornerRadius = dp(28).toFloat()
+        }
+        val coldRefraction = GradientDrawable(
+            GradientDrawable.Orientation.LEFT_RIGHT,
+            intArrayOf(
+                Color.argb(24, 76, 137, 255),
+                Color.argb(10, 255, 255, 255),
+                Color.argb(26, 38, 214, 225),
+            ),
+        ).apply {
+            cornerRadius = dp(28).toFloat()
+        }
+        return LayerDrawable(arrayOf(base, coldRefraction, topSheen)).apply {
+            setLayerInset(1, dp(5), dp(5), dp(5), dp(5))
+            setLayerInset(2, dp(8), dp(5), dp(8), dp(32))
         }
     }
 

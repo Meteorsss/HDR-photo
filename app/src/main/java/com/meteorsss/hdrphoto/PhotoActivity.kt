@@ -9,8 +9,10 @@ import android.graphics.Color
 import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
+import android.graphics.Typeface
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
 import android.media.ExifInterface
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
@@ -165,6 +167,9 @@ class PhotoActivity : Activity() {
             textSize = 16f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
+            background = floatingGlassBackground(dp(22), Color.argb(138, 26, 30, 38))
+            setPadding(dp(18), dp(9), dp(18), dp(9))
+            elevation = dp(8).toFloat()
         }
         root.addView(
             loading,
@@ -178,9 +183,11 @@ class PhotoActivity : Activity() {
         liveButton = TextView(this).apply {
             text = "LIVE"
             textSize = 13f
-            setTextColor(Color.rgb(58, 58, 58))
-            setBackgroundResource(R.drawable.badge_hdr)
-            setPadding(dp(10), dp(5), dp(10), dp(5))
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            background = floatingGlassBackground(dp(18), Color.argb(132, 24, 29, 38))
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            elevation = dp(10).toFloat()
             visibility = View.GONE
             setOnClickListener { toggleLiveVideo() }
         }
@@ -210,8 +217,9 @@ class PhotoActivity : Activity() {
     private fun buildDetailsPanel(): View {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(18, 18, 18))
-            setPadding(dp(18), dp(14), dp(18), dp(18))
+            background = detailsGlassBackground()
+            elevation = dp(14).toFloat()
+            setPadding(dp(20), dp(16), dp(20), dp(20))
             visibility = View.GONE
         }
         val header = LinearLayout(this).apply {
@@ -222,6 +230,7 @@ class PhotoActivity : Activity() {
             TextView(this).apply {
                 text = "图片详情"
                 textSize = 18f
+                typeface = Typeface.DEFAULT_BOLD
                 setTextColor(Color.WHITE)
             },
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
@@ -230,7 +239,8 @@ class PhotoActivity : Activity() {
             TextView(this).apply {
                 text = "关闭"
                 textSize = 14f
-                setTextColor(Color.LTGRAY)
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.rgb(198, 218, 255))
                 setPadding(dp(12), dp(8), dp(4), dp(8))
                 setOnClickListener { detailsPanel.visibility = View.GONE }
             },
@@ -501,14 +511,14 @@ class PhotoActivity : Activity() {
             TextView(this).apply {
                 text = label
                 textSize = 12f
-                setTextColor(Color.rgb(170, 170, 170))
+                setTextColor(Color.rgb(172, 180, 194))
             },
         )
         row.addView(
             TextView(this).apply {
                 text = value
                 textSize = 15f
-                setTextColor(Color.WHITE)
+                setTextColor(Color.rgb(246, 248, 252))
             },
         )
         detailsList.addView(row)
@@ -745,6 +755,43 @@ class PhotoActivity : Activity() {
     private fun widthOrScreen(): Int = if (root.width > 0) root.width else resources.displayMetrics.widthPixels
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private fun floatingGlassBackground(radius: Int, fillColor: Int): GradientDrawable {
+        return GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(
+                lightenAlpha(fillColor, 28),
+                fillColor,
+            ),
+        ).apply {
+            cornerRadius = radius.toFloat()
+            setStroke(dp(1), Color.argb(82, 255, 255, 255))
+        }
+    }
+
+    private fun detailsGlassBackground(): GradientDrawable {
+        return GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(Color.argb(236, 23, 27, 36), Color.argb(224, 7, 10, 16)),
+        ).apply {
+            cornerRadii = floatArrayOf(
+                dp(28).toFloat(), dp(28).toFloat(),
+                dp(28).toFloat(), dp(28).toFloat(),
+                0f, 0f,
+                0f, 0f,
+            )
+            setStroke(dp(1), Color.argb(62, 255, 255, 255))
+        }
+    }
+
+    private fun lightenAlpha(color: Int, extraAlpha: Int): Int {
+        return Color.argb(
+            (Color.alpha(color) + extraAlpha).coerceAtMost(255),
+            (Color.red(color) + 12).coerceAtMost(255),
+            (Color.green(color) + 12).coerceAtMost(255),
+            (Color.blue(color) + 16).coerceAtMost(255),
+        )
+    }
 
     companion object {
         const val EXTRA_LIVE_VIDEO_URI = "com.meteorsss.hdrphoto.LIVE_VIDEO_URI"

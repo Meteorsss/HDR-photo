@@ -9,6 +9,8 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.ImageDecoder
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -21,7 +23,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.AbsListView
 import android.widget.BaseAdapter
-import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -121,20 +122,22 @@ class MainActivity : Activity() {
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
+            background = appBackground()
         }
 
         val toolbar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(20), dp(18), dp(14), dp(12))
-            setBackgroundColor(Color.WHITE)
+            setPadding(dp(18), dp(14), dp(10), dp(14))
+            background = glassBackground(dp(26), Color.argb(190, 255, 255, 255))
+            elevation = dp(8).toFloat()
         }
 
         statusText = TextView(this).apply {
             text = getString(R.string.app_name)
-            textSize = 24f
-            setTextColor(Color.rgb(20, 20, 20))
+            textSize = 25f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.rgb(16, 22, 32))
             setSingleLine(false)
             includeFontPadding = true
         }
@@ -143,8 +146,15 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
         )
 
-        val refreshButton = Button(this).apply {
+        val refreshButton = TextView(this).apply {
             text = getString(R.string.refresh)
+            textSize = 14f
+            gravity = Gravity.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.rgb(38, 92, 170))
+            background = glassBackground(dp(20), Color.argb(142, 255, 255, 255))
+            setPadding(dp(16), 0, dp(16), 0)
+            elevation = dp(2).toFloat()
             setOnClickListener {
                 if (hasImageAccess()) loadPhotos() else requestImageAccess()
             }
@@ -155,19 +165,20 @@ class MainActivity : Activity() {
         )
 
         listView = ListView(this).apply {
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(Color.TRANSPARENT)
             divider = null
             cacheColorHint = Color.TRANSPARENT
             clipToPadding = false
-            setPadding(dp(2), dp(2), dp(2), dp(8))
+            setPadding(dp(2), dp(4), dp(2), dp(8))
             adapter = photoAdapter
         }
 
         val bottomNav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(dp(12), dp(6), dp(12), dp(8))
-            setBackgroundColor(Color.WHITE)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            background = glassBackground(dp(30), Color.argb(205, 255, 255, 255))
+            elevation = dp(10).toFloat()
         }
         photoNav = buildNavItem("照片") {
             showPhotos(null)
@@ -183,7 +194,9 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
-            ),
+            ).apply {
+                setMargins(dp(12), dp(10), dp(12), dp(4))
+            },
         )
         root.addView(listView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         root.addView(
@@ -191,7 +204,9 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
-            ),
+            ).apply {
+                setMargins(dp(18), dp(4), dp(18), dp(12))
+            },
         )
         setContentView(root)
         updateNavSelection(showingAlbums = false)
@@ -200,7 +215,8 @@ class MainActivity : Activity() {
     private fun buildNavItem(textValue: String, onClick: () -> Unit): TextView {
         return TextView(this).apply {
             text = textValue
-            textSize = 18f
+            textSize = 17f
+            typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setOnClickListener { onClick() }
         }
@@ -264,9 +280,11 @@ class MainActivity : Activity() {
 
     private fun updateNavSelection(showingAlbums: Boolean) {
         val selected = Color.rgb(67, 133, 245)
-        val normal = Color.rgb(120, 120, 120)
+        val normal = Color.rgb(96, 104, 116)
         photoNav.setTextColor(if (showingAlbums) normal else selected)
         albumNav.setTextColor(if (showingAlbums) selected else normal)
+        photoNav.background = if (showingAlbums) null else selectedNavBackground()
+        albumNav.background = if (showingAlbums) selectedNavBackground() else null
     }
 
     private fun openPhoto(item: PhotoItem) {
@@ -461,6 +479,36 @@ class MainActivity : Activity() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
+    private fun appBackground(): GradientDrawable {
+        return GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(
+                Color.rgb(247, 251, 255),
+                Color.rgb(239, 246, 251),
+                Color.rgb(249, 251, 255),
+            ),
+        )
+    }
+
+    private fun glassBackground(radius: Int, fillColor: Int): GradientDrawable {
+        return GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = radius.toFloat()
+            setColor(fillColor)
+            setStroke(dp(1), Color.argb(145, 255, 255, 255))
+        }
+    }
+
+    private fun selectedNavBackground(): GradientDrawable {
+        return GradientDrawable(
+            GradientDrawable.Orientation.LEFT_RIGHT,
+            intArrayOf(Color.argb(46, 67, 133, 245), Color.argb(30, 33, 190, 214)),
+        ).apply {
+            cornerRadius = dp(22).toFloat()
+            setStroke(dp(1), Color.argb(105, 255, 255, 255))
+        }
+    }
+
     companion object {
         private const val REQUEST_IMAGES = 2001
     }
@@ -512,28 +560,29 @@ private class DatedPhotoAdapter(
     private fun buildHeader(label: String): View {
         return TextView(activity).apply {
             text = label
-            textSize = 22f
-            setTextColor(Color.rgb(20, 20, 20))
+            textSize = 21f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.rgb(17, 24, 38))
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(activity.dp(20), activity.dp(18), activity.dp(8), activity.dp(10))
-            setBackgroundColor(Color.WHITE)
+            setPadding(activity.dp(20), activity.dp(18), activity.dp(8), activity.dp(9))
+            setBackgroundColor(Color.TRANSPARENT)
         }
     }
 
     private fun buildPhotoRow(items: List<PhotoItem>): View {
         val row = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(activity.dp(2), 0, activity.dp(2), 0)
-            setBackgroundColor(Color.WHITE)
+            setPadding(activity.dp(4), 0, activity.dp(4), 0)
+            setBackgroundColor(Color.TRANSPARENT)
         }
-        val size = ((activity.resources.displayMetrics.widthPixels - activity.dp(8)) / 3f).toInt()
+        val size = ((activity.resources.displayMetrics.widthPixels - activity.dp(20)) / 3f).toInt()
         repeat(3) { index ->
             val item = items.getOrNull(index)
             val cell = buildPhotoCell(size, item)
             row.addView(
                 cell,
                 LinearLayout.LayoutParams(0, size, 1f).apply {
-                    setMargins(activity.dp(1), activity.dp(1), activity.dp(1), activity.dp(1))
+                    setMargins(activity.dp(2), activity.dp(2), activity.dp(2), activity.dp(2))
                 },
             )
         }
@@ -543,12 +592,14 @@ private class DatedPhotoAdapter(
     private fun buildPhotoCell(size: Int, item: PhotoItem?): View {
         val frame = FrameLayout(activity).apply {
             layoutParams = AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, size)
-            setBackgroundColor(Color.rgb(240, 240, 240))
+            background = mediaTileBackground(activity)
+            elevation = activity.dp(1).toFloat()
+            clipToOutline = true
             visibility = if (item == null) View.INVISIBLE else View.VISIBLE
         }
         val image = ImageView(activity).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            setBackgroundColor(Color.rgb(235, 235, 235))
+            setBackgroundColor(Color.TRANSPARENT)
         }
         frame.addView(image, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         val hdrBadge = buildBadge(activity, "HDR")
@@ -632,15 +683,15 @@ private class AlbumAdapter(
         val rowItems = albums.drop(position * 2).take(2)
         val row = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(activity.dp(10), activity.dp(6), activity.dp(10), activity.dp(6))
-            setBackgroundColor(Color.WHITE)
+            setPadding(activity.dp(10), activity.dp(7), activity.dp(10), activity.dp(7))
+            setBackgroundColor(Color.TRANSPARENT)
         }
         repeat(2) { index ->
             val album = rowItems.getOrNull(index)
             row.addView(
                 buildAlbumCell(album),
                 LinearLayout.LayoutParams(0, activity.dp(190), 1f).apply {
-                    setMargins(activity.dp(6), 0, activity.dp(6), 0)
+                    setMargins(activity.dp(8), 0, activity.dp(8), activity.dp(8))
                 },
             )
         }
@@ -649,12 +700,14 @@ private class AlbumAdapter(
 
     private fun buildAlbumCell(album: AlbumItem?): View {
         val frame = FrameLayout(activity).apply {
-            setBackgroundColor(Color.rgb(235, 235, 235))
+            background = mediaTileBackground(activity)
+            elevation = activity.dp(4).toFloat()
+            clipToOutline = true
             visibility = if (album == null) View.INVISIBLE else View.VISIBLE
         }
         val image = ImageView(activity).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            setBackgroundColor(Color.rgb(230, 230, 230))
+            setBackgroundColor(Color.TRANSPARENT)
         }
         frame.addView(image, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         val hdrBadge = buildBadge(activity, "HDR")
@@ -664,8 +717,9 @@ private class AlbumAdapter(
         val label = TextView(activity).apply {
             textSize = 15f
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.argb(150, 0, 0, 0))
-            setPadding(activity.dp(10), activity.dp(7), activity.dp(10), activity.dp(7))
+            typeface = Typeface.DEFAULT_BOLD
+            background = darkGlassBackground(activity, activity.dp(16))
+            setPadding(activity.dp(12), activity.dp(8), activity.dp(12), activity.dp(8))
         }
         frame.addView(
             label,
@@ -794,11 +848,39 @@ private fun buildBadge(activity: Activity, textValue: String): TextView {
     return TextView(activity).apply {
         text = textValue
         textSize = 12f
-        typeface = android.graphics.Typeface.DEFAULT
-        setTextColor(Color.rgb(58, 58, 58))
-        setBackgroundResource(R.drawable.badge_hdr)
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(Color.rgb(52, 58, 66))
+        background = badgeGlassBackground(activity)
         setPadding(activity.dp(7), activity.dp(3), activity.dp(7), activity.dp(3))
         visibility = View.GONE
+    }
+}
+
+private fun mediaTileBackground(activity: Activity): GradientDrawable {
+    return GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = activity.dp(8).toFloat()
+        setColor(Color.argb(126, 255, 255, 255))
+        setStroke(activity.dp(1), Color.argb(138, 255, 255, 255))
+    }
+}
+
+private fun darkGlassBackground(activity: Activity, radius: Int): GradientDrawable {
+    return GradientDrawable(
+        GradientDrawable.Orientation.TOP_BOTTOM,
+        intArrayOf(Color.argb(164, 34, 39, 48), Color.argb(132, 9, 13, 20)),
+    ).apply {
+        cornerRadius = radius.toFloat()
+        setStroke(activity.dp(1), Color.argb(55, 255, 255, 255))
+    }
+}
+
+private fun badgeGlassBackground(activity: Activity): GradientDrawable {
+    return GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = activity.dp(5).toFloat()
+        setColor(Color.argb(190, 236, 240, 244))
+        setStroke(activity.dp(1), Color.argb(150, 255, 255, 255))
     }
 }
 

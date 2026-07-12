@@ -69,12 +69,13 @@ data class AlbumItem(
 
 class MainActivity : Activity() {
     private val executor: ExecutorService = Executors.newFixedThreadPool(4)
+    private val hdrQueue = LinkedBlockingDeque<Runnable>()
     private val hdrExecutor = ThreadPoolExecutor(
         2,
         2,
         0L,
         TimeUnit.MILLISECONDS,
-        LinkedBlockingDeque(),
+        hdrQueue,
     ).apply { prestartAllCoreThreads() }
     private val motionExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -132,7 +133,7 @@ class MainActivity : Activity() {
     }
 
     private fun buildLayout() {
-        tileBinder = PhotoTileBinder(this, executor, hdrExecutor, motionExecutor, mainHandler)
+        tileBinder = PhotoTileBinder(this, executor, hdrQueue, motionExecutor, mainHandler)
         photoAdapter = DatedPhotoAdapter(this, tileBinder) { item ->
             openPhoto(item)
         }
@@ -839,7 +840,7 @@ private class AlbumAdapter(
 private class PhotoTileBinder(
     private val activity: Activity,
     private val executor: ExecutorService,
-    private val hdrExecutor: ThreadPoolExecutor,
+    private val hdrQueue: LinkedBlockingDeque<Runnable>,
     private val motionExecutor: ExecutorService,
     private val mainHandler: Handler,
 ) {
@@ -900,7 +901,7 @@ private class PhotoTileBinder(
         val key = item.uri.toString()
         if (hdrCache.containsKey(key) || !hdrLoading.add(key)) return
 
-        hdrExecutor.queue.offerFirst(Runnable {
+        hdrQueue.offerFirst(Runnable {
             val isHdr = isUltraHdr(item.uri)
             hdrCache[key] = isHdr
             hdrStore.edit().putBoolean(hdrStoreKey(item), isHdr).apply()

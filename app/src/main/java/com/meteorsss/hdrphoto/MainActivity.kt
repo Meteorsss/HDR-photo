@@ -41,6 +41,9 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingDeque
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import kotlin.math.max
 
 data class PhotoItem(
@@ -66,7 +69,14 @@ data class AlbumItem(
 
 class MainActivity : Activity() {
     private val executor: ExecutorService = Executors.newFixedThreadPool(4)
-    private val metadataExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val hdrExecutor = ThreadPoolExecutor(
+        2,
+        2,
+        0L,
+        TimeUnit.MILLISECONDS,
+        LinkedBlockingDeque(),
+    ).apply { prestartAllCoreThreads() }
+    private val motionExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val allPhotos = mutableListOf<PhotoItem>()
     private val visiblePhotos = mutableListOf<PhotoItem>()
@@ -102,7 +112,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         executor.shutdownNow()
-        metadataExecutor.shutdownNow()
+        hdrExecutor.shutdownNow()
+        motionExecutor.shutdownNow()
         if (::tileBinder.isInitialized) tileBinder.clear()
         super.onDestroy()
     }
@@ -121,7 +132,7 @@ class MainActivity : Activity() {
     }
 
     private fun buildLayout() {
-        tileBinder = PhotoTileBinder(this, executor, metadataExecutor, mainHandler)
+        tileBinder = PhotoTileBinder(this, executor, hdrExecutor, motionExecutor, mainHandler)
         photoAdapter = DatedPhotoAdapter(this, tileBinder) { item ->
             openPhoto(item)
         }
@@ -828,7 +839,8 @@ private class AlbumAdapter(
 private class PhotoTileBinder(
     private val activity: Activity,
     private val executor: ExecutorService,
-    private val metadataExecutor: ExecutorService,
+    private val hdrExecutor: ThreadPoolExecutor,
+    private val motionExecutor: ExecutorService,
     private val mainHandler: Handler,
 ) {
     private val thumbCache = object : LruCache<String, Bitmap>(thumbnailCacheSizeKb()) {
@@ -839,6 +851,7 @@ private class PhotoTileBinder(
     private val thumbLoading = ConcurrentHashMap.newKeySet<String>()
     private val hdrLoading = ConcurrentHashMap.newKeySet<String>()
     private val motionPhotoLoading = ConcurrentHashMap.newKeySet<String>()
+    private val hdrStore = activity.getSharedPreferences("ultra-hdr-cache-v1", Activity.MODE_PRIVATE)
 
     fun bind(
         image: ImageView,
@@ -852,6 +865,7 @@ private class PhotoTileBinder(
         hdrBadge.tag = key
         liveBadge.tag = key
         image.setImageBitmap(thumbCache.get(key))
+        restoreHdrResult(item)
         hdrBadge.visibility = if (hdrCache[key] == true) View.VISIBLE else View.GONE
         liveBadge.visibility = if (showLive && isLivePhoto(item)) View.VISIBLE else View.GONE
         loadThumbnailIfNeeded(item, image)
@@ -886,16 +900,17 @@ private class PhotoTileBinder(
         val key = item.uri.toString()
         if (hdrCache.containsKey(key) || !hdrLoading.add(key)) return
 
-        metadataExecutor.execute {
+        hdrExecutor.queue.offerFirst(Runnable {
             val isHdr = isUltraHdr(item.uri)
             hdrCache[key] = isHdr
+            hdrStore.edit().putBoolean(hdrStoreKey(item), isHdr).apply()
             mainHandler.post {
                 if (hdrBadge.tag == key) {
                     hdrBadge.visibility = if (isHdr) View.VISIBLE else View.GONE
                 }
             }
             hdrLoading.remove(key)
-        }
+        })
     }
 
     private fun detectMotionPhotoIfNeeded(item: PhotoItem, liveBadge: TextView) {
@@ -903,7 +918,7 @@ private class PhotoTileBinder(
         val key = item.uri.toString()
         if (motionPhotoCache.containsKey(key) || !motionPhotoLoading.add(key)) return
 
-        metadataExecutor.execute {
+        motionExecutor.execute {
             val isMotionPhoto = MotionPhotoSupport.hasMotionPhotoMetadata(activity, item.uri)
             motionPhotoCache[key] = isMotionPhoto
             mainHandler.post {
@@ -921,7 +936,7 @@ private class PhotoTileBinder(
             val source = ImageDecoder.createSource(activity.contentResolver, uri)
             val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
                 val longestSide = max(info.size.width, info.size.height)
-                val sample = max(1, longestSide / 768)
+                val sample = max(1, longestSide / HDR_DETECTION_DIMENSION)
                 decoder.setTargetSampleSize(sample)
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
             }
@@ -929,6 +944,17 @@ private class PhotoTileBinder(
             bitmap.recycle()
             result
         }.getOrDefault(false)
+    }
+
+    private fun restoreHdrResult(item: PhotoItem) {
+        val key = item.uri.toString()
+        if (hdrCache.containsKey(key)) return
+        val storedKey = hdrStoreKey(item)
+        if (hdrStore.contains(storedKey)) hdrCache[key] = hdrStore.getBoolean(storedKey, false)
+    }
+
+    private fun hdrStoreKey(item: PhotoItem): String {
+        return "${item.uri}|${item.sizeBytes}|${item.dateMillis}"
     }
 
     fun clear() {
@@ -997,5 +1023,7 @@ private fun badgeParams(activity: Activity, gravityValue: Int): FrameLayout.Layo
         setMargins(activity.dp(6), activity.dp(6), activity.dp(6), 0)
     }
 }
+
+private const val HDR_DETECTION_DIMENSION = 192
 
 private fun Activity.dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()

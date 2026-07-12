@@ -488,7 +488,7 @@ class PhotoActivity : Activity() {
         detailsList.removeAllViews()
         detailsPanel.visibility = View.VISIBLE
         addDetail("文件名", item.name.ifBlank { item.uri.lastPathSegment.orEmpty() })
-        addDetail("位置", item.uri.toString())
+        addDetail("位置", item.name.ifBlank { item.uri.lastPathSegment.orEmpty() })
         addDetail("像素", if (item.width > 0 && item.height > 0) "${item.width} x ${item.height}" else "未知")
 
         executor.execute {
@@ -533,7 +533,7 @@ class PhotoActivity : Activity() {
         val exif = readExif(uri)
         val name = media["name"] ?: uri.lastPathSegment.orEmpty()
         putDetail("文件名", name)
-        putDetail("位置", uri.toString())
+        putDetail("位置", readableMediaPath(media, name, uri))
         putDetail("大小", formatBytes(media["size"]?.toLongOrNull()))
         putDetail("格式", media["mime"] ?: name.substringAfterLast('.', "未知").uppercase())
         putDetail("像素", listOfNotNull(media["width"], media["height"]).joinToString(" x "))
@@ -567,6 +567,9 @@ class PhotoActivity : Activity() {
         )
         if (Build.VERSION.SDK_INT >= 29) {
             projection += MediaStore.Images.Media.DATE_TAKEN
+            projection += MediaStore.MediaColumns.RELATIVE_PATH
+        } else {
+            projection += MediaStore.MediaColumns.DATA
         }
         val values = mutableMapOf<String, String>()
         contentResolver.query(uri, projection.toTypedArray(), null, null, null)?.use { cursor ->
@@ -580,10 +583,21 @@ class PhotoActivity : Activity() {
                 values["dateModified"] = cursor.stringValue(MediaStore.MediaColumns.DATE_MODIFIED)
                 if (Build.VERSION.SDK_INT >= 29) {
                     values["dateTaken"] = cursor.stringValue(MediaStore.Images.Media.DATE_TAKEN)
+                    values["relativePath"] = cursor.stringValue(MediaStore.MediaColumns.RELATIVE_PATH)
+                } else {
+                    values["dataPath"] = cursor.stringValue(MediaStore.MediaColumns.DATA)
                 }
             }
         }
         return values
+    }
+
+    private fun readableMediaPath(media: Map<String, String>, name: String, uri: Uri): String {
+        media["dataPath"]?.takeIf { it.isNotBlank() }?.let { return it }
+        media["relativePath"]?.takeIf { it.isNotBlank() }?.let { folder ->
+            return folder.trimEnd('/') + "/" + name
+        }
+        return name.ifBlank { uri.lastPathSegment ?: "未知位置" }
     }
 
     private fun readExif(uri: Uri): Map<String, String> {
@@ -731,9 +745,14 @@ class PhotoActivity : Activity() {
     }
 
     private fun sampleSizeFor(width: Int, height: Int): Int {
-        val longest = maxOf(width, height)
-        if (longest <= MAX_DECODE_DIMENSION || longest <= 0) return 1
-        return ((longest + MAX_DECODE_DIMENSION - 1) / MAX_DECODE_DIMENSION).coerceAtLeast(1)
+        if (width <= 0 || height <= 0) return 1
+        var sample = 1
+        while (maxOf(width / sample, height / sample) > MAX_DECODE_DIMENSION ||
+            (width.toLong() / sample) * (height.toLong() / sample) > MAX_DECODE_PIXELS
+        ) {
+            sample *= 2
+        }
+        return sample
     }
 
     private fun formatBytes(size: Long?): String {
@@ -798,7 +817,8 @@ class PhotoActivity : Activity() {
         const val EXTRA_MOTION_PHOTO = "com.meteorsss.hdrphoto.MOTION_PHOTO"
         private const val LARGE_PHOTO_BYTES = 20L * 1024L * 1024L
         private const val LOADING_DELAY_MS = 450L
-        private const val MAX_DECODE_DIMENSION = 16_000
+        private const val MAX_DECODE_DIMENSION = 8_192
+        private const val MAX_DECODE_PIXELS = 32_000_000L
         private const val EXIF_DATETIME_ORIGINAL = "DateTimeOriginal"
         private const val EXIF_MAKE = "Make"
         private const val EXIF_MODEL = "Model"

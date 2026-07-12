@@ -12,6 +12,8 @@ import android.graphics.ImageDecoder
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
+import android.graphics.drawable.RippleDrawable
+import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -19,9 +21,12 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import android.util.Size
+import android.util.LruCache
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
+import android.view.animation.DecelerateInterpolator
 import android.widget.AbsListView
 import android.widget.BaseAdapter
 import android.widget.FrameLayout
@@ -61,6 +66,7 @@ data class AlbumItem(
 
 class MainActivity : Activity() {
     private val executor: ExecutorService = Executors.newFixedThreadPool(4)
+    private val metadataExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val allPhotos = mutableListOf<PhotoItem>()
     private val visiblePhotos = mutableListOf<PhotoItem>()
@@ -96,6 +102,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         executor.shutdownNow()
+        metadataExecutor.shutdownNow()
+        if (::tileBinder.isInitialized) tileBinder.clear()
         super.onDestroy()
     }
 
@@ -113,7 +121,7 @@ class MainActivity : Activity() {
     }
 
     private fun buildLayout() {
-        tileBinder = PhotoTileBinder(this, executor, mainHandler)
+        tileBinder = PhotoTileBinder(this, executor, metadataExecutor, mainHandler)
         photoAdapter = DatedPhotoAdapter(this, tileBinder) { item ->
             openPhoto(item)
         }
@@ -180,7 +188,7 @@ class MainActivity : Activity() {
         val bottomNav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(dp(8), dp(7), dp(8), dp(7))
+            setPadding(dp(6), dp(6), dp(6), dp(6))
             background = liquidGlassNavBackground()
             elevation = dp(18).toFloat()
             clipToOutline = true
@@ -191,8 +199,8 @@ class MainActivity : Activity() {
         albumNav = buildNavItem("相册") {
             showAlbums()
         }
-        bottomNav.addView(photoNav, LinearLayout.LayoutParams(0, dp(58), 1f))
-        bottomNav.addView(albumNav, LinearLayout.LayoutParams(0, dp(58), 1f))
+        bottomNav.addView(photoNav, LinearLayout.LayoutParams(0, dp(56), 1f).apply { setMargins(dp(1), 0, dp(1), 0) })
+        bottomNav.addView(albumNav, LinearLayout.LayoutParams(0, dp(56), 1f).apply { setMargins(dp(1), 0, dp(1), 0) })
 
         content.addView(
             toolbar,
@@ -222,16 +230,42 @@ class MainActivity : Activity() {
             },
         )
         setContentView(root)
+        root.setOnApplyWindowInsetsListener { view, insets ->
+            val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+            view.setPadding(bars.left, bars.top, bars.right, 0)
+            listView.setPadding(dp(2), dp(4), dp(2), dp(104) + bars.bottom)
+            (bottomNav.layoutParams as FrameLayout.LayoutParams).apply {
+                bottomMargin = dp(14) + bars.bottom
+                bottomNav.layoutParams = this
+            }
+            insets
+        }
+        root.requestApplyInsets()
         updateNavSelection(showingAlbums = false)
     }
 
     private fun buildNavItem(textValue: String, onClick: () -> Unit): TextView {
         return TextView(this).apply {
             text = textValue
-            textSize = 17f
+            textSize = 16f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            setOnClickListener { onClick() }
+            letterSpacing = 0.01f
+            foreground = RippleDrawable(
+                ColorStateList.valueOf(Color.argb(28, 20, 94, 210)),
+                null,
+                GradientDrawable().apply {
+                    setColor(Color.WHITE)
+                    cornerRadius = dp(27).toFloat()
+                },
+            )
+            setOnClickListener {
+                animate().scaleX(0.96f).scaleY(0.96f).setDuration(70L).withEndAction {
+                    animate().scaleX(1f).scaleY(1f).setDuration(210L)
+                        .setInterpolator(DecelerateInterpolator()).start()
+                    onClick()
+                }.start()
+            }
         }
     }
 
@@ -292,12 +326,14 @@ class MainActivity : Activity() {
     }
 
     private fun updateNavSelection(showingAlbums: Boolean) {
-        val selected = Color.rgb(67, 133, 245)
-        val normal = Color.rgb(96, 104, 116)
+        val selected = Color.rgb(22, 92, 214)
+        val normal = Color.rgb(74, 84, 101)
         photoNav.setTextColor(if (showingAlbums) normal else selected)
         albumNav.setTextColor(if (showingAlbums) selected else normal)
         photoNav.background = if (showingAlbums) null else selectedNavBackground()
         albumNav.background = if (showingAlbums) selectedNavBackground() else null
+        photoNav.animate().alpha(if (showingAlbums) 0.72f else 1f).setDuration(220L).start()
+        albumNav.animate().alpha(if (showingAlbums) 1f else 0.72f).setDuration(220L).start()
     }
 
     private fun openPhoto(item: PhotoItem) {
@@ -515,10 +551,14 @@ class MainActivity : Activity() {
     private fun selectedNavBackground(): GradientDrawable {
         return GradientDrawable(
             GradientDrawable.Orientation.LEFT_RIGHT,
-            intArrayOf(Color.argb(64, 72, 142, 255), Color.argb(42, 42, 205, 225)),
+            intArrayOf(
+                Color.argb(190, 255, 255, 255),
+                Color.argb(118, 225, 239, 255),
+                Color.argb(150, 248, 252, 255),
+            ),
         ).apply {
-            cornerRadius = dp(22).toFloat()
-            setStroke(dp(1), Color.argb(150, 255, 255, 255))
+            cornerRadius = dp(27).toFloat()
+            setStroke(dp(1), Color.argb(230, 255, 255, 255))
         }
     }
 
@@ -526,26 +566,26 @@ class MainActivity : Activity() {
         val base = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM,
             intArrayOf(
-                Color.argb(156, 255, 255, 255),
-                Color.argb(92, 246, 251, 255),
-                Color.argb(118, 230, 240, 250),
+                Color.argb(184, 255, 255, 255),
+                Color.argb(108, 238, 247, 255),
+                Color.argb(142, 214, 231, 249),
             ),
         ).apply {
             cornerRadius = dp(34).toFloat()
-            setStroke(dp(1), Color.argb(190, 255, 255, 255))
+            setStroke(dp(1), Color.argb(235, 255, 255, 255))
         }
         val topSheen = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM,
-            intArrayOf(Color.argb(152, 255, 255, 255), Color.argb(18, 255, 255, 255)),
+            intArrayOf(Color.argb(220, 255, 255, 255), Color.argb(28, 255, 255, 255)),
         ).apply {
             cornerRadius = dp(28).toFloat()
         }
         val coldRefraction = GradientDrawable(
             GradientDrawable.Orientation.LEFT_RIGHT,
             intArrayOf(
-                Color.argb(24, 76, 137, 255),
-                Color.argb(10, 255, 255, 255),
-                Color.argb(26, 38, 214, 225),
+                Color.argb(34, 76, 137, 255),
+                Color.argb(6, 255, 255, 255),
+                Color.argb(38, 48, 196, 255),
             ),
         ).apply {
             cornerRadius = dp(28).toFloat()
@@ -788,9 +828,12 @@ private class AlbumAdapter(
 private class PhotoTileBinder(
     private val activity: Activity,
     private val executor: ExecutorService,
+    private val metadataExecutor: ExecutorService,
     private val mainHandler: Handler,
 ) {
-    private val thumbCache = ConcurrentHashMap<String, Bitmap>()
+    private val thumbCache = object : LruCache<String, Bitmap>(thumbnailCacheSizeKb()) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount / 1024
+    }
     private val hdrCache = ConcurrentHashMap<String, Boolean>()
     private val motionPhotoCache = ConcurrentHashMap<String, Boolean>()
     private val thumbLoading = ConcurrentHashMap.newKeySet<String>()
@@ -808,7 +851,7 @@ private class PhotoTileBinder(
         image.tag = key
         hdrBadge.tag = key
         liveBadge.tag = key
-        image.setImageBitmap(thumbCache[key])
+        image.setImageBitmap(thumbCache.get(key))
         hdrBadge.visibility = if (hdrCache[key] == true) View.VISIBLE else View.GONE
         liveBadge.visibility = if (showLive && isLivePhoto(item)) View.VISIBLE else View.GONE
         loadThumbnailIfNeeded(item, image)
@@ -820,7 +863,7 @@ private class PhotoTileBinder(
 
     private fun loadThumbnailIfNeeded(item: PhotoItem, image: ImageView) {
         val key = item.uri.toString()
-        if (thumbCache.containsKey(key) || !thumbLoading.add(key)) return
+        if (thumbCache.get(key) != null || !thumbLoading.add(key)) return
 
         executor.execute {
             val thumb = runCatching {
@@ -828,7 +871,7 @@ private class PhotoTileBinder(
             }.getOrNull()
 
             if (thumb != null) {
-                thumbCache[key] = thumb
+                thumbCache.put(key, thumb)
                 mainHandler.post {
                     if (image.tag == key) {
                         image.setImageBitmap(thumb)
@@ -843,7 +886,7 @@ private class PhotoTileBinder(
         val key = item.uri.toString()
         if (hdrCache.containsKey(key) || !hdrLoading.add(key)) return
 
-        executor.execute {
+        metadataExecutor.execute {
             val isHdr = isUltraHdr(item.uri)
             hdrCache[key] = isHdr
             mainHandler.post {
@@ -860,7 +903,7 @@ private class PhotoTileBinder(
         val key = item.uri.toString()
         if (motionPhotoCache.containsKey(key) || !motionPhotoLoading.add(key)) return
 
-        executor.execute {
+        metadataExecutor.execute {
             val isMotionPhoto = MotionPhotoSupport.hasMotionPhotoMetadata(activity, item.uri)
             motionPhotoCache[key] = isMotionPhoto
             mainHandler.post {
@@ -882,8 +925,22 @@ private class PhotoTileBinder(
                 decoder.setTargetSampleSize(sample)
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
             }
-            bitmap.gainmap != null
+            val result = bitmap.gainmap != null
+            bitmap.recycle()
+            result
         }.getOrDefault(false)
+    }
+
+    fun clear() {
+        thumbCache.evictAll()
+        hdrCache.clear()
+        motionPhotoCache.clear()
+    }
+
+    private fun thumbnailCacheSizeKb(): Int {
+        val maxMemoryKb = (Runtime.getRuntime().maxMemory() / 1024L)
+            .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        return (maxMemoryKb / 8).coerceIn(16 * 1024, 96 * 1024)
     }
 
     private fun isLivePhoto(item: PhotoItem): Boolean {

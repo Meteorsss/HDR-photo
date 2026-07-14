@@ -588,7 +588,11 @@ class MainActivity : Activity() {
         }
         val topSheen = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM,
-            intArrayOf(Color.argb(220, 255, 255, 255), Color.argb(28, 255, 255, 255)),
+            intArrayOf(
+                Color.argb(150, 255, 255, 255),
+                Color.argb(42, 255, 255, 255),
+                Color.TRANSPARENT,
+            ),
         ).apply {
             cornerRadius = dp(28).toFloat()
         }
@@ -604,7 +608,7 @@ class MainActivity : Activity() {
         }
         return LayerDrawable(arrayOf(base, coldRefraction, topSheen)).apply {
             setLayerInset(1, dp(5), dp(5), dp(5), dp(5))
-            setLayerInset(2, dp(8), dp(5), dp(8), dp(32))
+            setLayerInset(2, dp(8), dp(5), dp(8), dp(5))
         }
     }
 

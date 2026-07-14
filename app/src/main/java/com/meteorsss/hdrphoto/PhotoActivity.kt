@@ -22,7 +22,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
-import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.Surface
@@ -59,38 +58,9 @@ class PhotoActivity : Activity() {
     private var lastVideoWidth = 0
     private var lastVideoHeight = 0
     private var lastVideoRotation = 0
-
-    private val gestureDetector by lazy {
-        GestureDetector(
-            this,
-            object : GestureDetector.SimpleOnGestureListener() {
-                override fun onFling(
-                    e1: MotionEvent?,
-                    e2: MotionEvent,
-                    velocityX: Float,
-                    velocityY: Float,
-                ): Boolean {
-                    val start = e1 ?: return false
-                    val dx = e2.x - start.x
-                    val dy = e2.y - start.y
-                    if (detailsPanel.visibility == View.VISIBLE) return false
-
-                    if (kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > dp(90)) {
-                        if (!imageView.isZoomed() && mediaPlayer == null) {
-                            if (dx < 0) showAdjacent(1) else showAdjacent(-1)
-                            return true
-                        }
-                    }
-
-                    if (-dy > dp(90) && kotlin.math.abs(velocityY) > kotlin.math.abs(velocityX)) {
-                        showDetails()
-                        return true
-                    }
-                    return false
-                }
-            },
-        )
-    }
+    private var gestureStartX = 0f
+    private var gestureStartY = 0f
+    private var singlePointerGesture = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -112,8 +82,40 @@ class PhotoActivity : Activity() {
     }
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-        gestureDetector.onTouchEvent(event)
-        return super.dispatchTouchEvent(event)
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                gestureStartX = event.x
+                gestureStartY = event.y
+                singlePointerGesture = true
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> singlePointerGesture = false
+        }
+
+        val childHandled = super.dispatchTouchEvent(event)
+        var navigationHandled = false
+        if (event.actionMasked == MotionEvent.ACTION_UP && singlePointerGesture) {
+            navigationHandled = handleGallerySwipe(event.x - gestureStartX, event.y - gestureStartY)
+            singlePointerGesture = false
+        } else if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
+            singlePointerGesture = false
+        }
+        return childHandled || navigationHandled
+    }
+
+    private fun handleGallerySwipe(dx: Float, dy: Float): Boolean {
+        if (detailsPanel.visibility == View.VISIBLE || imageView.isZoomed() || mediaPlayer != null) return false
+        val horizontal = kotlin.math.abs(dx) > kotlin.math.abs(dy) * SWIPE_DIRECTION_BIAS
+        if (horizontal && kotlin.math.abs(dx) >= dp(HORIZONTAL_SWIPE_DP)) {
+            if (dx < 0f) showAdjacent(1) else showAdjacent(-1)
+            return true
+        }
+
+        val vertical = kotlin.math.abs(dy) > kotlin.math.abs(dx) * SWIPE_DIRECTION_BIAS
+        if (vertical && kotlin.math.abs(dy) >= dp(VERTICAL_SWIPE_DP)) {
+            if (dy > 0f) finish() else showDetails()
+            return true
+        }
+        return false
     }
 
     override fun onDestroy() {
@@ -819,6 +821,9 @@ class PhotoActivity : Activity() {
         private const val LOADING_DELAY_MS = 450L
         private const val MAX_DECODE_DIMENSION = 8_192
         private const val MAX_DECODE_PIXELS = 32_000_000L
+        private const val HORIZONTAL_SWIPE_DP = 24
+        private const val VERTICAL_SWIPE_DP = 48
+        private const val SWIPE_DIRECTION_BIAS = 1.2f
         private const val EXIF_DATETIME_ORIGINAL = "DateTimeOriginal"
         private const val EXIF_MAKE = "Make"
         private const val EXIF_MODEL = "Model"

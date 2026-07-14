@@ -44,6 +44,8 @@ class PhotoActivity : Activity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val loadToken = AtomicInteger(0)
     private lateinit var root: FrameLayout
+    private lateinit var galleryPreview: ImageView
+    private lateinit var dismissScrim: View
     private lateinit var imageView: ZoomImageView
     private lateinit var videoView: TextureView
     private lateinit var loading: TextView
@@ -134,12 +136,14 @@ class PhotoActivity : Activity() {
 
         dismissDragActive = true
         val translation = dy.coerceAtLeast(0f)
-        val fraction = (translation / root.height.coerceAtLeast(1)).coerceIn(0f, 1f)
+        val progressDistance = root.height.coerceAtLeast(1) * DISMISS_PROGRESS_HEIGHT_FRACTION
+        val fraction = (translation / progressDistance).coerceIn(0f, 1f)
         val scale = 1f - fraction * DISMISS_SCALE_RANGE
         imageView.translationY = translation
         imageView.scaleX = scale
         imageView.scaleY = scale
-        imageView.alpha = 1f - fraction * DISMISS_ALPHA_RANGE
+        imageView.alpha = 1f
+        dismissScrim.alpha = 1f - fraction
         liveButton.translationY = translation
         liveButton.alpha = 1f - fraction * 0.6f
         return true
@@ -152,15 +156,18 @@ class PhotoActivity : Activity() {
         }
         dismissDragActive = false
         dismissAnimating = true
+        val target = dismissTarget()
+        dismissScrim.animate().alpha(0f).setDuration(DISMISS_FINISH_DURATION_MS).start()
         liveButton.animate()
             .translationY(root.height.toFloat())
             .alpha(0f)
             .setDuration(DISMISS_FINISH_DURATION_MS)
             .start()
         imageView.animate()
-            .translationY(root.height.toFloat())
-            .scaleX(DISMISS_FINISH_SCALE)
-            .scaleY(DISMISS_FINISH_SCALE)
+            .translationX(target.translationX)
+            .translationY(target.translationY)
+            .scaleX(target.scale)
+            .scaleY(target.scale)
             .alpha(0f)
             .setDuration(DISMISS_FINISH_DURATION_MS)
             .setInterpolator(android.view.animation.DecelerateInterpolator())
@@ -171,8 +178,30 @@ class PhotoActivity : Activity() {
             .start()
     }
 
+    private fun dismissTarget(): DismissTarget {
+        val bounds = GallerySession.launchBounds
+        val samePhoto = GallerySession.launchUri == currentItem?.uri?.toString()
+        if (bounds == null || !samePhoto || root.width <= 0 || root.height <= 0) {
+            return DismissTarget(0f, root.height * 0.28f, DISMISS_FALLBACK_SCALE)
+        }
+        val rootLocation = IntArray(2)
+        root.getLocationOnScreen(rootLocation)
+        val targetCenterX = bounds.exactCenterX() - rootLocation[0]
+        val targetCenterY = bounds.exactCenterY() - rootLocation[1]
+        val scale = (bounds.width().toFloat() / root.width).coerceIn(DISMISS_MIN_TARGET_SCALE, DISMISS_MAX_TARGET_SCALE)
+        return DismissTarget(
+            translationX = targetCenterX - root.width * 0.5f,
+            translationY = targetCenterY - root.height * 0.5f,
+            scale = scale,
+        )
+    }
+
     private fun restoreDismissDrag() {
         dismissDragActive = false
+        dismissScrim.animate()
+            .alpha(1f)
+            .setDuration(DISMISS_RETURN_DURATION_MS)
+            .start()
         liveButton.animate()
             .translationY(0f)
             .alpha(1f)
@@ -180,6 +209,7 @@ class PhotoActivity : Activity() {
             .setInterpolator(android.view.animation.DecelerateInterpolator())
             .start()
         imageView.animate()
+            .translationX(0f)
             .translationY(0f)
             .scaleX(1f)
             .scaleY(1f)
@@ -209,15 +239,25 @@ class PhotoActivity : Activity() {
         stopVideo()
         videoSurface?.release()
         executor.shutdownNow()
+        galleryPreview.setImageBitmap(null)
+        GallerySession.clearLaunchPreview()
         super.onDestroy()
     }
 
     private fun buildLayout() {
         root = FrameLayout(this).apply {
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(Color.TRANSPARENT)
         }
+        galleryPreview = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_XY
+            setImageBitmap(GallerySession.galleryPreview)
+            setBackgroundColor(Color.rgb(245, 248, 252))
+        }
+        root.addView(galleryPreview, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        dismissScrim = View(this).apply { setBackgroundColor(Color.BLACK) }
+        root.addView(dismissScrim, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         imageView = ZoomImageView(this).apply {
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(Color.TRANSPARENT)
         }
         root.addView(imageView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
 
@@ -372,9 +412,12 @@ class PhotoActivity : Activity() {
         dismissDragActive = false
         dismissAnimating = false
         imageView.animate().cancel()
+        imageView.translationX = 0f
         imageView.translationY = 0f
         imageView.scaleX = 1f
         imageView.scaleY = 1f
+        imageView.alpha = 1f
+        dismissScrim.alpha = 1f
         stopVideo()
         detailsPanel.visibility = View.GONE
         liveButton.visibility = View.GONE
@@ -907,6 +950,8 @@ class PhotoActivity : Activity() {
         )
     }
 
+    private data class DismissTarget(val translationX: Float, val translationY: Float, val scale: Float)
+
     companion object {
         const val EXTRA_LIVE_VIDEO_URI = "com.meteorsss.hdrphoto.LIVE_VIDEO_URI"
         const val EXTRA_MOTION_PHOTO = "com.meteorsss.hdrphoto.MOTION_PHOTO"
@@ -918,9 +963,11 @@ class PhotoActivity : Activity() {
         private const val VERTICAL_SWIPE_DP = 48
         private const val SWIPE_DIRECTION_BIAS = 1.2f
         private const val DISMISS_DRAG_START_DP = 6
-        private const val DISMISS_SCALE_RANGE = 0.12f
-        private const val DISMISS_ALPHA_RANGE = 0.35f
-        private const val DISMISS_FINISH_SCALE = 0.88f
+        private const val DISMISS_PROGRESS_HEIGHT_FRACTION = 0.55f
+        private const val DISMISS_SCALE_RANGE = 0.58f
+        private const val DISMISS_FALLBACK_SCALE = 0.25f
+        private const val DISMISS_MIN_TARGET_SCALE = 0.18f
+        private const val DISMISS_MAX_TARGET_SCALE = 0.42f
         private const val DISMISS_FINISH_DURATION_MS = 180L
         private const val DISMISS_RETURN_DURATION_MS = 220L
         private const val EXIF_DATETIME_ORIGINAL = "DateTimeOriginal"

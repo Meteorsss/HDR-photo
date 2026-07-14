@@ -7,7 +7,9 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.ImageDecoder
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -82,6 +84,7 @@ class MainActivity : Activity() {
     private val allPhotos = mutableListOf<PhotoItem>()
     private val visiblePhotos = mutableListOf<PhotoItem>()
     private val albums = mutableListOf<AlbumItem>()
+    private lateinit var rootView: FrameLayout
     private lateinit var statusText: TextView
     private lateinit var listView: ListView
     private lateinit var photoNav: TextView
@@ -134,8 +137,8 @@ class MainActivity : Activity() {
 
     private fun buildLayout() {
         tileBinder = PhotoTileBinder(this, executor, hdrQueue, motionExecutor, mainHandler)
-        photoAdapter = DatedPhotoAdapter(this, tileBinder) { item ->
-            openPhoto(item)
+        photoAdapter = DatedPhotoAdapter(this, tileBinder) { item, sourceView ->
+            openPhoto(item, sourceView)
         }
         albumAdapter = AlbumAdapter(this, albums, tileBinder) { album ->
             showPhotos(album)
@@ -144,6 +147,7 @@ class MainActivity : Activity() {
         val root = FrameLayout(this).apply {
             background = appBackground()
         }
+        rootView = root
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.TRANSPARENT)
@@ -348,9 +352,16 @@ class MainActivity : Activity() {
         albumNav.animate().alpha(if (showingAlbums) 1f else 0.72f).setDuration(220L).start()
     }
 
-    private fun openPhoto(item: PhotoItem) {
+    private fun openPhoto(item: PhotoItem, sourceView: View) {
         val position = visiblePhotos.indexOfFirst { it.uri == item.uri }.coerceAtLeast(0)
         GallerySession.setPhotos(visiblePhotos, position)
+        val location = IntArray(2)
+        sourceView.getLocationOnScreen(location)
+        GallerySession.setLaunchPreview(
+            captureGalleryPreview(),
+            Rect(location[0], location[1], location[0] + sourceView.width, location[1] + sourceView.height),
+            item.uri,
+        )
         val intent = Intent(this, PhotoActivity::class.java).apply {
             data = item.uri
             item.liveVideoUri?.let {
@@ -359,6 +370,24 @@ class MainActivity : Activity() {
             putExtra(PhotoActivity.EXTRA_MOTION_PHOTO, tileBinder.isMotionPhoto(item))
         }
         startActivity(intent)
+    }
+
+    private fun captureGalleryPreview(): Bitmap? {
+        val width = rootView.width
+        val height = rootView.height
+        if (width <= 0 || height <= 0) return null
+        return runCatching {
+            val bitmap = Bitmap.createBitmap(
+                (width * GALLERY_PREVIEW_SCALE).toInt().coerceAtLeast(1),
+                (height * GALLERY_PREVIEW_SCALE).toInt().coerceAtLeast(1),
+                Bitmap.Config.ARGB_8888,
+            )
+            Canvas(bitmap).apply {
+                scale(GALLERY_PREVIEW_SCALE, GALLERY_PREVIEW_SCALE)
+                rootView.draw(this)
+            }
+            bitmap
+        }.getOrNull()
     }
 
     private fun queryImages(): List<PhotoItem> {
@@ -637,7 +666,7 @@ private data class AlbumRow(val items: List<AlbumItem>)
 private class DatedPhotoAdapter(
     private val activity: Activity,
     private val tileBinder: PhotoTileBinder,
-    private val openPhoto: (PhotoItem) -> Unit,
+    private val openPhoto: (PhotoItem, View) -> Unit,
 ) : BaseAdapter() {
     private var rows: List<PhotoListRow> = emptyList()
 
@@ -711,7 +740,7 @@ private class DatedPhotoAdapter(
         frame.addView(liveBadge, badgeParams(activity, Gravity.TOP or Gravity.START))
 
         if (item != null) {
-            frame.setOnClickListener { openPhoto(item) }
+            frame.setOnClickListener { openPhoto(item, image) }
             tileBinder.bind(image, hdrBadge, liveBadge, item, showLive = true)
         }
         return frame
@@ -1030,5 +1059,6 @@ private fun badgeParams(activity: Activity, gravityValue: Int): FrameLayout.Layo
 }
 
 private const val HDR_DETECTION_DIMENSION = 192
+private const val GALLERY_PREVIEW_SCALE = 0.5f
 
 private fun Activity.dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()

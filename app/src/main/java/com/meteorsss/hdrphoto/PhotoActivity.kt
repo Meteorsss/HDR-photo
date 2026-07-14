@@ -61,6 +61,8 @@ class PhotoActivity : Activity() {
     private var gestureStartX = 0f
     private var gestureStartY = 0f
     private var singlePointerGesture = false
+    private var dismissDragActive = false
+    private var dismissAnimating = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,24 +84,109 @@ class PhotoActivity : Activity() {
     }
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (dismissAnimating) return true
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                imageView.animate().cancel()
+                liveButton.animate().cancel()
                 gestureStartX = event.x
                 gestureStartY = event.y
                 singlePointerGesture = true
             }
-            MotionEvent.ACTION_POINTER_DOWN -> singlePointerGesture = false
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                singlePointerGesture = false
+                if (dismissDragActive) restoreDismissDrag()
+            }
         }
 
         val childHandled = super.dispatchTouchEvent(event)
+        val dx = event.x - gestureStartX
+        val dy = event.y - gestureStartY
         var navigationHandled = false
-        if (event.actionMasked == MotionEvent.ACTION_UP && singlePointerGesture) {
-            navigationHandled = handleGallerySwipe(event.x - gestureStartX, event.y - gestureStartY)
-            singlePointerGesture = false
-        } else if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
-            singlePointerGesture = false
+        when (event.actionMasked) {
+            MotionEvent.ACTION_MOVE -> {
+                if (singlePointerGesture) navigationHandled = updateDismissDrag(dx, dy)
+            }
+            MotionEvent.ACTION_UP -> {
+                if (singlePointerGesture) {
+                    navigationHandled = if (dismissDragActive) {
+                        completeDismissDrag(dy)
+                        true
+                    } else {
+                        handleGallerySwipe(dx, dy)
+                    }
+                }
+                singlePointerGesture = false
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                if (dismissDragActive) restoreDismissDrag()
+                singlePointerGesture = false
+            }
         }
         return childHandled || navigationHandled
+    }
+
+    private fun updateDismissDrag(dx: Float, dy: Float): Boolean {
+        if (detailsPanel.visibility == View.VISIBLE || imageView.isZoomed() || mediaPlayer != null) return false
+        if (!dismissDragActive &&
+            (dy <= dp(DISMISS_DRAG_START_DP) || kotlin.math.abs(dy) <= kotlin.math.abs(dx) * 1.05f)
+        ) return false
+
+        dismissDragActive = true
+        val translation = dy.coerceAtLeast(0f)
+        val fraction = (translation / root.height.coerceAtLeast(1)).coerceIn(0f, 1f)
+        val scale = 1f - fraction * DISMISS_SCALE_RANGE
+        imageView.translationY = translation
+        imageView.scaleX = scale
+        imageView.scaleY = scale
+        imageView.alpha = 1f - fraction * DISMISS_ALPHA_RANGE
+        liveButton.translationY = translation
+        liveButton.alpha = 1f - fraction * 0.6f
+        return true
+    }
+
+    private fun completeDismissDrag(distanceY: Float) {
+        if (distanceY < dp(VERTICAL_SWIPE_DP)) {
+            restoreDismissDrag()
+            return
+        }
+        dismissDragActive = false
+        dismissAnimating = true
+        liveButton.animate()
+            .translationY(root.height.toFloat())
+            .alpha(0f)
+            .setDuration(DISMISS_FINISH_DURATION_MS)
+            .start()
+        imageView.animate()
+            .translationY(root.height.toFloat())
+            .scaleX(DISMISS_FINISH_SCALE)
+            .scaleY(DISMISS_FINISH_SCALE)
+            .alpha(0f)
+            .setDuration(DISMISS_FINISH_DURATION_MS)
+            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .withEndAction {
+                finish()
+                overridePendingTransition(0, 0)
+            }
+            .start()
+    }
+
+    private fun restoreDismissDrag() {
+        dismissDragActive = false
+        liveButton.animate()
+            .translationY(0f)
+            .alpha(1f)
+            .setDuration(DISMISS_RETURN_DURATION_MS)
+            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .start()
+        imageView.animate()
+            .translationY(0f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .alpha(1f)
+            .setDuration(DISMISS_RETURN_DURATION_MS)
+            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .start()
     }
 
     private fun handleGallerySwipe(dx: Float, dy: Float): Boolean {
@@ -111,8 +198,8 @@ class PhotoActivity : Activity() {
         }
 
         val vertical = kotlin.math.abs(dy) > kotlin.math.abs(dx) * SWIPE_DIRECTION_BIAS
-        if (vertical && kotlin.math.abs(dy) >= dp(VERTICAL_SWIPE_DP)) {
-            if (dy > 0f) finish() else showDetails()
+        if (vertical && -dy >= dp(VERTICAL_SWIPE_DP)) {
+            showDetails()
             return true
         }
         return false
@@ -282,6 +369,12 @@ class PhotoActivity : Activity() {
     private fun loadCurrent(direction: Int) {
         val item = currentItem ?: return
         val token = loadToken.incrementAndGet()
+        dismissDragActive = false
+        dismissAnimating = false
+        imageView.animate().cancel()
+        imageView.translationY = 0f
+        imageView.scaleX = 1f
+        imageView.scaleY = 1f
         stopVideo()
         detailsPanel.visibility = View.GONE
         liveButton.visibility = View.GONE
@@ -824,6 +917,12 @@ class PhotoActivity : Activity() {
         private const val HORIZONTAL_SWIPE_DP = 24
         private const val VERTICAL_SWIPE_DP = 48
         private const val SWIPE_DIRECTION_BIAS = 1.2f
+        private const val DISMISS_DRAG_START_DP = 6
+        private const val DISMISS_SCALE_RANGE = 0.12f
+        private const val DISMISS_ALPHA_RANGE = 0.35f
+        private const val DISMISS_FINISH_SCALE = 0.88f
+        private const val DISMISS_FINISH_DURATION_MS = 180L
+        private const val DISMISS_RETURN_DURATION_MS = 220L
         private const val EXIF_DATETIME_ORIGINAL = "DateTimeOriginal"
         private const val EXIF_MAKE = "Make"
         private const val EXIF_MODEL = "Model"

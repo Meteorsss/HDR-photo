@@ -7,7 +7,6 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Rect
 import android.graphics.ImageDecoder
@@ -25,6 +24,7 @@ import android.provider.MediaStore
 import android.util.Size
 import android.util.LruCache
 import android.view.Gravity
+import android.view.PixelCopy
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
@@ -93,6 +93,7 @@ class MainActivity : Activity() {
     private lateinit var photoAdapter: DatedPhotoAdapter
     private lateinit var albumAdapter: AlbumAdapter
     private var currentAlbum: AlbumItem? = null
+    private var openingPhoto = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -353,14 +354,17 @@ class MainActivity : Activity() {
     }
 
     private fun openPhoto(item: PhotoItem, sourceView: View) {
+        if (openingPhoto) return
+        openingPhoto = true
         val position = visiblePhotos.indexOfFirst { it.uri == item.uri }.coerceAtLeast(0)
         GallerySession.setPhotos(visiblePhotos, position)
         val location = IntArray(2)
         sourceView.getLocationOnScreen(location)
-        GallerySession.setLaunchPreview(
-            captureGalleryPreview(),
-            Rect(location[0], location[1], location[0] + sourceView.width, location[1] + sourceView.height),
-            item.uri,
+        val sourceBounds = Rect(
+            location[0],
+            location[1],
+            location[0] + sourceView.width,
+            location[1] + sourceView.height,
         )
         val intent = Intent(this, PhotoActivity::class.java).apply {
             data = item.uri
@@ -369,25 +373,49 @@ class MainActivity : Activity() {
             }
             putExtra(PhotoActivity.EXTRA_MOTION_PHOTO, tileBinder.isMotionPhoto(item))
         }
-        startActivity(intent)
+        captureGalleryPreview { bitmap ->
+            if (isFinishing || isDestroyed) {
+                bitmap?.takeIf { !it.isRecycled }?.recycle()
+                openingPhoto = false
+                return@captureGalleryPreview
+            }
+            GallerySession.setLaunchPreview(bitmap, sourceBounds, item.uri)
+            startActivity(intent)
+            openingPhoto = false
+        }
     }
 
-    private fun captureGalleryPreview(): Bitmap? {
+    private fun captureGalleryPreview(onCaptured: (Bitmap?) -> Unit) {
         val width = rootView.width
         val height = rootView.height
-        if (width <= 0 || height <= 0) return null
-        return runCatching {
-            val bitmap = Bitmap.createBitmap(
+        if (width <= 0 || height <= 0) {
+            onCaptured(null)
+            return
+        }
+        val bitmap = runCatching {
+            Bitmap.createBitmap(
                 (width * GALLERY_PREVIEW_SCALE).toInt().coerceAtLeast(1),
                 (height * GALLERY_PREVIEW_SCALE).toInt().coerceAtLeast(1),
                 Bitmap.Config.ARGB_8888,
             )
-            Canvas(bitmap).apply {
-                scale(GALLERY_PREVIEW_SCALE, GALLERY_PREVIEW_SCALE)
-                rootView.draw(this)
-            }
-            bitmap
         }.getOrNull()
+        if (bitmap == null) {
+            onCaptured(null)
+            return
+        }
+        PixelCopy.request(
+            window,
+            bitmap,
+            { result ->
+                if (result == PixelCopy.SUCCESS) {
+                    onCaptured(bitmap)
+                } else {
+                    bitmap.recycle()
+                    onCaptured(null)
+                }
+            },
+            mainHandler,
+        )
     }
 
     private fun queryImages(): List<PhotoItem> {

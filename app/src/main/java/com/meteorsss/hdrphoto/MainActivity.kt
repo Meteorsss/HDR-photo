@@ -29,7 +29,6 @@ import android.view.PixelCopy
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
-import android.view.WindowInsetsController
 import android.view.animation.DecelerateInterpolator
 import android.widget.AbsListView
 import android.widget.BaseAdapter
@@ -106,9 +105,11 @@ class MainActivity : Activity() {
         val systemBarColor = if (darkMode) Color.rgb(9, 13, 20) else Color.WHITE
         window.statusBarColor = systemBarColor
         window.navigationBarColor = systemBarColor
-        val lightBars = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
-            WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
-        window.insetsController?.setSystemBarsAppearance(if (darkMode) 0 else lightBars, lightBars)
+        window.decorView.systemUiVisibility = if (darkMode) {
+            0
+        } else {
+            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        }
         buildLayout()
         if (hasImageAccess()) {
             loadPhotos()

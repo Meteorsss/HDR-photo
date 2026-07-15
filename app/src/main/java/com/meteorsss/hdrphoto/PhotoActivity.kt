@@ -29,7 +29,6 @@ import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowInsetsController
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -76,9 +75,7 @@ class PhotoActivity : Activity() {
         }
         window.statusBarColor = Color.BLACK
         window.navigationBarColor = Color.BLACK
-        val lightBars = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
-            WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
-        window.insetsController?.setSystemBarsAppearance(0, lightBars)
+        window.decorView.systemUiVisibility = 0
         buildLayout()
 
         val sessionIndex = GallerySession.index

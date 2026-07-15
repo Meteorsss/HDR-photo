@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.ImageDecoder
@@ -22,7 +23,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
-import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.Surface
@@ -30,6 +30,7 @@ import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -45,6 +46,8 @@ class PhotoActivity : Activity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val loadToken = AtomicInteger(0)
     private lateinit var root: FrameLayout
+    private lateinit var galleryPreview: ImageView
+    private lateinit var dismissScrim: View
     private lateinit var imageView: ZoomImageView
     private lateinit var videoView: TextureView
     private lateinit var loading: TextView
@@ -59,38 +62,11 @@ class PhotoActivity : Activity() {
     private var lastVideoWidth = 0
     private var lastVideoHeight = 0
     private var lastVideoRotation = 0
-
-    private val gestureDetector by lazy {
-        GestureDetector(
-            this,
-            object : GestureDetector.SimpleOnGestureListener() {
-                override fun onFling(
-                    e1: MotionEvent?,
-                    e2: MotionEvent,
-                    velocityX: Float,
-                    velocityY: Float,
-                ): Boolean {
-                    val start = e1 ?: return false
-                    val dx = e2.x - start.x
-                    val dy = e2.y - start.y
-                    if (detailsPanel.visibility == View.VISIBLE) return false
-
-                    if (kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > dp(90)) {
-                        if (!imageView.isZoomed() && mediaPlayer == null) {
-                            if (dx < 0) showAdjacent(1) else showAdjacent(-1)
-                            return true
-                        }
-                    }
-
-                    if (-dy > dp(90) && kotlin.math.abs(velocityY) > kotlin.math.abs(velocityX)) {
-                        showDetails()
-                        return true
-                    }
-                    return false
-                }
-            },
-        )
-    }
+    private var gestureStartX = 0f
+    private var gestureStartY = 0f
+    private var singlePointerGesture = false
+    private var dismissDragActive = false
+    private var dismissAnimating = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -99,6 +75,7 @@ class PhotoActivity : Activity() {
         }
         window.statusBarColor = Color.BLACK
         window.navigationBarColor = Color.BLACK
+        window.decorView.systemUiVisibility = 0
         buildLayout()
 
         val sessionIndex = GallerySession.index
@@ -112,23 +89,180 @@ class PhotoActivity : Activity() {
     }
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-        gestureDetector.onTouchEvent(event)
-        return super.dispatchTouchEvent(event)
+        if (dismissAnimating) return true
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                imageView.animate().cancel()
+                liveButton.animate().cancel()
+                gestureStartX = event.x
+                gestureStartY = event.y
+                singlePointerGesture = true
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                singlePointerGesture = false
+                if (dismissDragActive) restoreDismissDrag()
+            }
+        }
+
+        val childHandled = super.dispatchTouchEvent(event)
+        val dx = event.x - gestureStartX
+        val dy = event.y - gestureStartY
+        var navigationHandled = false
+        when (event.actionMasked) {
+            MotionEvent.ACTION_MOVE -> {
+                if (singlePointerGesture) navigationHandled = updateDismissDrag(dx, dy)
+            }
+            MotionEvent.ACTION_UP -> {
+                if (singlePointerGesture) {
+                    navigationHandled = if (dismissDragActive) {
+                        completeDismissDrag(dy)
+                        true
+                    } else {
+                        handleGallerySwipe(dx, dy)
+                    }
+                }
+                singlePointerGesture = false
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                if (dismissDragActive) restoreDismissDrag()
+                singlePointerGesture = false
+            }
+        }
+        return childHandled || navigationHandled
+    }
+
+    private fun updateDismissDrag(dx: Float, dy: Float): Boolean {
+        if (detailsPanel.visibility == View.VISIBLE || imageView.isZoomed() || mediaPlayer != null) return false
+        if (!dismissDragActive &&
+            (dy <= dp(DISMISS_DRAG_START_DP) || kotlin.math.abs(dy) <= kotlin.math.abs(dx) * 1.05f)
+        ) return false
+
+        dismissDragActive = true
+        val translation = dy.coerceAtLeast(0f)
+        val progressDistance = root.height.coerceAtLeast(1) * DISMISS_PROGRESS_HEIGHT_FRACTION
+        val fraction = (translation / progressDistance).coerceIn(0f, 1f)
+        val scale = 1f - fraction * DISMISS_SCALE_RANGE
+        imageView.translationY = translation
+        imageView.scaleX = scale
+        imageView.scaleY = scale
+        imageView.alpha = 1f
+        dismissScrim.alpha = 1f - fraction
+        liveButton.translationY = translation
+        liveButton.alpha = 1f - fraction * 0.6f
+        return true
+    }
+
+    private fun completeDismissDrag(distanceY: Float) {
+        if (distanceY < dp(VERTICAL_SWIPE_DP)) {
+            restoreDismissDrag()
+            return
+        }
+        dismissDragActive = false
+        dismissAnimating = true
+        val target = dismissTarget()
+        dismissScrim.animate().alpha(0f).setDuration(DISMISS_FINISH_DURATION_MS).start()
+        liveButton.animate()
+            .translationY(root.height.toFloat())
+            .alpha(0f)
+            .setDuration(DISMISS_FINISH_DURATION_MS)
+            .start()
+        imageView.animate()
+            .translationX(target.translationX)
+            .translationY(target.translationY)
+            .scaleX(target.scale)
+            .scaleY(target.scale)
+            .alpha(0f)
+            .setDuration(DISMISS_FINISH_DURATION_MS)
+            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .withEndAction {
+                finish()
+                overridePendingTransition(0, 0)
+            }
+            .start()
+    }
+
+    private fun dismissTarget(): DismissTarget {
+        val bounds = GallerySession.launchBounds
+        val samePhoto = GallerySession.launchUri == currentItem?.uri?.toString()
+        if (bounds == null || !samePhoto || root.width <= 0 || root.height <= 0) {
+            return DismissTarget(0f, root.height * 0.28f, DISMISS_FALLBACK_SCALE)
+        }
+        val rootLocation = IntArray(2)
+        root.getLocationOnScreen(rootLocation)
+        val targetCenterX = bounds.exactCenterX() - rootLocation[0]
+        val targetCenterY = bounds.exactCenterY() - rootLocation[1]
+        val scale = (bounds.width().toFloat() / root.width).coerceIn(DISMISS_MIN_TARGET_SCALE, DISMISS_MAX_TARGET_SCALE)
+        return DismissTarget(
+            translationX = targetCenterX - root.width * 0.5f,
+            translationY = targetCenterY - root.height * 0.5f,
+            scale = scale,
+        )
+    }
+
+    private fun restoreDismissDrag() {
+        dismissDragActive = false
+        dismissScrim.animate()
+            .alpha(1f)
+            .setDuration(DISMISS_RETURN_DURATION_MS)
+            .start()
+        liveButton.animate()
+            .translationY(0f)
+            .alpha(1f)
+            .setDuration(DISMISS_RETURN_DURATION_MS)
+            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .start()
+        imageView.animate()
+            .translationX(0f)
+            .translationY(0f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .alpha(1f)
+            .setDuration(DISMISS_RETURN_DURATION_MS)
+            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .start()
+    }
+
+    private fun handleGallerySwipe(dx: Float, dy: Float): Boolean {
+        if (detailsPanel.visibility == View.VISIBLE || imageView.isZoomed() || mediaPlayer != null) return false
+        val horizontal = kotlin.math.abs(dx) > kotlin.math.abs(dy) * SWIPE_DIRECTION_BIAS
+        if (horizontal && kotlin.math.abs(dx) >= dp(HORIZONTAL_SWIPE_DP)) {
+            if (dx < 0f) showAdjacent(1) else showAdjacent(-1)
+            return true
+        }
+
+        val vertical = kotlin.math.abs(dy) > kotlin.math.abs(dx) * SWIPE_DIRECTION_BIAS
+        if (vertical && -dy >= dp(VERTICAL_SWIPE_DP)) {
+            showDetails()
+            return true
+        }
+        return false
     }
 
     override fun onDestroy() {
         stopVideo()
         videoSurface?.release()
         executor.shutdownNow()
+        galleryPreview.setImageBitmap(null)
+        GallerySession.clearLaunchPreview()
         super.onDestroy()
     }
 
     private fun buildLayout() {
         root = FrameLayout(this).apply {
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(Color.TRANSPARENT)
         }
+        galleryPreview = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_XY
+            setImageBitmap(GallerySession.galleryPreview)
+            setBackgroundColor(
+                if (isDarkMode()) Color.rgb(9, 13, 20) else Color.rgb(245, 248, 252),
+            )
+        }
+        root.addView(galleryPreview, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        dismissScrim = View(this).apply { setBackgroundColor(Color.BLACK) }
+        root.addView(dismissScrim, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         imageView = ZoomImageView(this).apply {
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(Color.TRANSPARENT)
         }
         root.addView(imageView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
 
@@ -280,6 +414,15 @@ class PhotoActivity : Activity() {
     private fun loadCurrent(direction: Int) {
         val item = currentItem ?: return
         val token = loadToken.incrementAndGet()
+        dismissDragActive = false
+        dismissAnimating = false
+        imageView.animate().cancel()
+        imageView.translationX = 0f
+        imageView.translationY = 0f
+        imageView.scaleX = 1f
+        imageView.scaleY = 1f
+        imageView.alpha = 1f
+        dismissScrim.alpha = 1f
         stopVideo()
         detailsPanel.visibility = View.GONE
         liveButton.visibility = View.GONE
@@ -488,7 +631,7 @@ class PhotoActivity : Activity() {
         detailsList.removeAllViews()
         detailsPanel.visibility = View.VISIBLE
         addDetail("文件名", item.name.ifBlank { item.uri.lastPathSegment.orEmpty() })
-        addDetail("位置", item.uri.toString())
+        addDetail("位置", item.name.ifBlank { item.uri.lastPathSegment.orEmpty() })
         addDetail("像素", if (item.width > 0 && item.height > 0) "${item.width} x ${item.height}" else "未知")
 
         executor.execute {
@@ -533,7 +676,7 @@ class PhotoActivity : Activity() {
         val exif = readExif(uri)
         val name = media["name"] ?: uri.lastPathSegment.orEmpty()
         putDetail("文件名", name)
-        putDetail("位置", uri.toString())
+        putDetail("位置", readableMediaPath(media, name, uri))
         putDetail("大小", formatBytes(media["size"]?.toLongOrNull()))
         putDetail("格式", media["mime"] ?: name.substringAfterLast('.', "未知").uppercase())
         putDetail("像素", listOfNotNull(media["width"], media["height"]).joinToString(" x "))
@@ -567,6 +710,9 @@ class PhotoActivity : Activity() {
         )
         if (Build.VERSION.SDK_INT >= 29) {
             projection += MediaStore.Images.Media.DATE_TAKEN
+            projection += MediaStore.MediaColumns.RELATIVE_PATH
+        } else {
+            projection += MediaStore.MediaColumns.DATA
         }
         val values = mutableMapOf<String, String>()
         contentResolver.query(uri, projection.toTypedArray(), null, null, null)?.use { cursor ->
@@ -580,10 +726,21 @@ class PhotoActivity : Activity() {
                 values["dateModified"] = cursor.stringValue(MediaStore.MediaColumns.DATE_MODIFIED)
                 if (Build.VERSION.SDK_INT >= 29) {
                     values["dateTaken"] = cursor.stringValue(MediaStore.Images.Media.DATE_TAKEN)
+                    values["relativePath"] = cursor.stringValue(MediaStore.MediaColumns.RELATIVE_PATH)
+                } else {
+                    values["dataPath"] = cursor.stringValue(MediaStore.MediaColumns.DATA)
                 }
             }
         }
         return values
+    }
+
+    private fun readableMediaPath(media: Map<String, String>, name: String, uri: Uri): String {
+        media["dataPath"]?.takeIf { it.isNotBlank() }?.let { return it }
+        media["relativePath"]?.takeIf { it.isNotBlank() }?.let { folder ->
+            return folder.trimEnd('/') + "/" + name
+        }
+        return name.ifBlank { uri.lastPathSegment ?: "未知位置" }
     }
 
     private fun readExif(uri: Uri): Map<String, String> {
@@ -731,9 +888,14 @@ class PhotoActivity : Activity() {
     }
 
     private fun sampleSizeFor(width: Int, height: Int): Int {
-        val longest = maxOf(width, height)
-        if (longest <= MAX_DECODE_DIMENSION || longest <= 0) return 1
-        return ((longest + MAX_DECODE_DIMENSION - 1) / MAX_DECODE_DIMENSION).coerceAtLeast(1)
+        if (width <= 0 || height <= 0) return 1
+        var sample = 1
+        while (maxOf(width / sample, height / sample) > MAX_DECODE_DIMENSION ||
+            (width.toLong() / sample) * (height.toLong() / sample) > MAX_DECODE_PIXELS
+        ) {
+            sample *= 2
+        }
+        return sample
     }
 
     private fun formatBytes(size: Long?): String {
@@ -753,6 +915,11 @@ class PhotoActivity : Activity() {
     }
 
     private fun widthOrScreen(): Int = if (root.width > 0) root.width else resources.displayMetrics.widthPixels
+
+    private fun isDarkMode(): Boolean {
+        return resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+            Configuration.UI_MODE_NIGHT_YES
+    }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
@@ -793,12 +960,26 @@ class PhotoActivity : Activity() {
         )
     }
 
+    private data class DismissTarget(val translationX: Float, val translationY: Float, val scale: Float)
+
     companion object {
         const val EXTRA_LIVE_VIDEO_URI = "com.meteorsss.hdrphoto.LIVE_VIDEO_URI"
         const val EXTRA_MOTION_PHOTO = "com.meteorsss.hdrphoto.MOTION_PHOTO"
         private const val LARGE_PHOTO_BYTES = 20L * 1024L * 1024L
         private const val LOADING_DELAY_MS = 450L
-        private const val MAX_DECODE_DIMENSION = 16_000
+        private const val MAX_DECODE_DIMENSION = 8_192
+        private const val MAX_DECODE_PIXELS = 32_000_000L
+        private const val HORIZONTAL_SWIPE_DP = 24
+        private const val VERTICAL_SWIPE_DP = 48
+        private const val SWIPE_DIRECTION_BIAS = 1.2f
+        private const val DISMISS_DRAG_START_DP = 6
+        private const val DISMISS_PROGRESS_HEIGHT_FRACTION = 0.55f
+        private const val DISMISS_SCALE_RANGE = 0.58f
+        private const val DISMISS_FALLBACK_SCALE = 0.25f
+        private const val DISMISS_MIN_TARGET_SCALE = 0.18f
+        private const val DISMISS_MAX_TARGET_SCALE = 0.42f
+        private const val DISMISS_FINISH_DURATION_MS = 180L
+        private const val DISMISS_RETURN_DURATION_MS = 220L
         private const val EXIF_DATETIME_ORIGINAL = "DateTimeOriginal"
         private const val EXIF_MAKE = "Make"
         private const val EXIF_MODEL = "Model"

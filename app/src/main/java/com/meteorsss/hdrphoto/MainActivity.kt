@@ -6,6 +6,7 @@ import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Rect
@@ -28,6 +29,7 @@ import android.view.PixelCopy
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.animation.DecelerateInterpolator
 import android.widget.AbsListView
 import android.widget.BaseAdapter
@@ -100,13 +102,13 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 26) {
             window.colorMode = ActivityInfo.COLOR_MODE_WIDE_COLOR_GAMUT
         }
-        window.statusBarColor = Color.WHITE
-        window.navigationBarColor = Color.WHITE
-        if (Build.VERSION.SDK_INT >= 23) {
-            var flags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
-            if (Build.VERSION.SDK_INT >= 26) flags = flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
-            window.decorView.systemUiVisibility = flags
-        }
+        val darkMode = isDarkMode()
+        val systemBarColor = if (darkMode) Color.rgb(9, 13, 20) else Color.WHITE
+        window.statusBarColor = systemBarColor
+        window.navigationBarColor = systemBarColor
+        val lightBars = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+            WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+        window.insetsController?.setSystemBarsAppearance(if (darkMode) 0 else lightBars, lightBars)
         buildLayout()
         if (hasImageAccess()) {
             loadPhotos()
@@ -158,7 +160,10 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(18), dp(14), dp(10), dp(14))
-            background = glassBackground(dp(26), Color.argb(190, 255, 255, 255))
+            background = glassBackground(
+                dp(26),
+                if (isDarkMode()) Color.argb(210, 26, 32, 42) else Color.argb(190, 255, 255, 255),
+            )
             elevation = dp(8).toFloat()
         }
 
@@ -166,7 +171,7 @@ class MainActivity : Activity() {
             text = getString(R.string.app_name)
             textSize = 25f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.rgb(16, 22, 32))
+            setTextColor(if (isDarkMode()) Color.rgb(239, 244, 252) else Color.rgb(16, 22, 32))
             setSingleLine(false)
             includeFontPadding = true
         }
@@ -180,8 +185,11 @@ class MainActivity : Activity() {
             textSize = 14f
             gravity = Gravity.CENTER
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.rgb(38, 92, 170))
-            background = glassBackground(dp(20), Color.argb(142, 255, 255, 255))
+            setTextColor(if (isDarkMode()) Color.rgb(126, 177, 255) else Color.rgb(38, 92, 170))
+            background = glassBackground(
+                dp(20),
+                if (isDarkMode()) Color.argb(170, 43, 52, 66) else Color.argb(142, 255, 255, 255),
+            )
             setPadding(dp(16), 0, dp(16), 0)
             elevation = dp(2).toFloat()
             setOnClickListener {
@@ -343,8 +351,8 @@ class MainActivity : Activity() {
     }
 
     private fun updateNavSelection(showingAlbums: Boolean) {
-        val selected = Color.rgb(22, 92, 214)
-        val normal = Color.rgb(74, 84, 101)
+        val selected = if (isDarkMode()) Color.rgb(132, 180, 255) else Color.rgb(22, 92, 214)
+        val normal = if (isDarkMode()) Color.rgb(174, 184, 201) else Color.rgb(74, 84, 101)
         photoNav.setTextColor(if (showingAlbums) normal else selected)
         albumNav.setTextColor(if (showingAlbums) selected else normal)
         photoNav.background = if (showingAlbums) null else selectedNavBackground()
@@ -598,14 +606,12 @@ class MainActivity : Activity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun appBackground(): GradientDrawable {
-        return GradientDrawable(
-            GradientDrawable.Orientation.TOP_BOTTOM,
-            intArrayOf(
-                Color.rgb(247, 251, 255),
-                Color.rgb(239, 246, 251),
-                Color.rgb(249, 251, 255),
-            ),
-        )
+        val colors = if (isDarkMode()) {
+            intArrayOf(Color.rgb(9, 13, 20), Color.rgb(14, 20, 30), Color.rgb(8, 12, 19))
+        } else {
+            intArrayOf(Color.rgb(247, 251, 255), Color.rgb(239, 246, 251), Color.rgb(249, 251, 255))
+        }
+        return GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, colors)
     }
 
     private fun glassBackground(radius: Int, fillColor: Int): GradientDrawable {
@@ -613,53 +619,82 @@ class MainActivity : Activity() {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = radius.toFloat()
             setColor(fillColor)
-            setStroke(dp(1), Color.argb(145, 255, 255, 255))
+            setStroke(
+                dp(1),
+                if (isDarkMode()) Color.argb(72, 194, 218, 255) else Color.argb(145, 255, 255, 255),
+            )
         }
     }
 
     private fun selectedNavBackground(): GradientDrawable {
-        return GradientDrawable(
-            GradientDrawable.Orientation.LEFT_RIGHT,
+        val colors = if (isDarkMode()) {
+            intArrayOf(
+                Color.argb(205, 55, 70, 92),
+                Color.argb(185, 34, 54, 82),
+                Color.argb(195, 48, 63, 86),
+            )
+        } else {
             intArrayOf(
                 Color.argb(190, 255, 255, 255),
                 Color.argb(118, 225, 239, 255),
                 Color.argb(150, 248, 252, 255),
-            ),
-        ).apply {
+            )
+        }
+        return GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, colors).apply {
             cornerRadius = dp(27).toFloat()
-            setStroke(dp(1), Color.argb(230, 255, 255, 255))
+            setStroke(
+                dp(1),
+                if (isDarkMode()) Color.argb(110, 185, 216, 255) else Color.argb(230, 255, 255, 255),
+            )
         }
     }
 
     private fun liquidGlassNavBackground(): LayerDrawable {
-        val base = GradientDrawable(
-            GradientDrawable.Orientation.TOP_BOTTOM,
+        val baseColors = if (isDarkMode()) {
+            intArrayOf(
+                Color.argb(224, 43, 51, 64),
+                Color.argb(204, 23, 31, 44),
+                Color.argb(218, 14, 21, 33),
+            )
+        } else {
             intArrayOf(
                 Color.argb(184, 255, 255, 255),
                 Color.argb(108, 238, 247, 255),
                 Color.argb(142, 214, 231, 249),
-            ),
-        ).apply {
+            )
+        }
+        val base = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, baseColors).apply {
             cornerRadius = dp(34).toFloat()
-            setStroke(dp(1), Color.argb(235, 255, 255, 255))
+            setStroke(
+                dp(1),
+                if (isDarkMode()) Color.argb(105, 183, 211, 255) else Color.argb(235, 255, 255, 255),
+            )
         }
         val topSheen = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM,
-            intArrayOf(
-                Color.argb(150, 255, 255, 255),
-                Color.argb(42, 255, 255, 255),
-                Color.TRANSPARENT,
-            ),
+            if (isDarkMode()) {
+                intArrayOf(Color.argb(72, 220, 235, 255), Color.argb(18, 150, 190, 245), Color.TRANSPARENT)
+            } else {
+                intArrayOf(Color.argb(150, 255, 255, 255), Color.argb(42, 255, 255, 255), Color.TRANSPARENT)
+            },
         ).apply {
             cornerRadius = dp(28).toFloat()
         }
         val coldRefraction = GradientDrawable(
             GradientDrawable.Orientation.LEFT_RIGHT,
-            intArrayOf(
-                Color.argb(34, 76, 137, 255),
-                Color.argb(6, 255, 255, 255),
-                Color.argb(38, 48, 196, 255),
-            ),
+            if (isDarkMode()) {
+                intArrayOf(
+                    Color.argb(54, 68, 129, 220),
+                    Color.argb(12, 170, 205, 255),
+                    Color.argb(58, 37, 118, 216),
+                )
+            } else {
+                intArrayOf(
+                    Color.argb(34, 76, 137, 255),
+                    Color.argb(6, 255, 255, 255),
+                    Color.argb(38, 48, 196, 255),
+                )
+            },
         ).apply {
             cornerRadius = dp(28).toFloat()
         }
@@ -722,7 +757,7 @@ private class DatedPhotoAdapter(
             text = label
             textSize = 21f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.rgb(17, 24, 38))
+            setTextColor(if (activity.isDarkMode()) Color.rgb(230, 236, 246) else Color.rgb(17, 24, 38))
             gravity = Gravity.CENTER_VERTICAL
             setPadding(activity.dp(20), activity.dp(18), activity.dp(8), activity.dp(9))
             setBackgroundColor(Color.TRANSPARENT)
@@ -1041,7 +1076,9 @@ private fun buildBadge(activity: Activity, textValue: String): TextView {
         text = textValue
         textSize = 12f
         typeface = Typeface.DEFAULT_BOLD
-        setTextColor(Color.rgb(52, 58, 66))
+        setTextColor(
+            if (activity.isDarkMode()) Color.rgb(224, 233, 246) else Color.rgb(52, 58, 66),
+        )
         background = badgeGlassBackground(activity)
         setPadding(activity.dp(7), activity.dp(3), activity.dp(7), activity.dp(3))
         visibility = View.GONE
@@ -1052,8 +1089,13 @@ private fun mediaTileBackground(activity: Activity): GradientDrawable {
     return GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
         cornerRadius = activity.dp(8).toFloat()
-        setColor(Color.argb(126, 255, 255, 255))
-        setStroke(activity.dp(1), Color.argb(138, 255, 255, 255))
+        setColor(
+            if (activity.isDarkMode()) Color.argb(210, 29, 36, 47) else Color.argb(126, 255, 255, 255),
+        )
+        setStroke(
+            activity.dp(1),
+            if (activity.isDarkMode()) Color.argb(78, 173, 201, 238) else Color.argb(138, 255, 255, 255),
+        )
     }
 }
 
@@ -1071,8 +1113,13 @@ private fun badgeGlassBackground(activity: Activity): GradientDrawable {
     return GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
         cornerRadius = activity.dp(5).toFloat()
-        setColor(Color.argb(190, 236, 240, 244))
-        setStroke(activity.dp(1), Color.argb(150, 255, 255, 255))
+        setColor(
+            if (activity.isDarkMode()) Color.argb(218, 38, 47, 61) else Color.argb(190, 236, 240, 244),
+        )
+        setStroke(
+            activity.dp(1),
+            if (activity.isDarkMode()) Color.argb(96, 189, 215, 248) else Color.argb(150, 255, 255, 255),
+        )
     }
 }
 
@@ -1088,5 +1135,10 @@ private fun badgeParams(activity: Activity, gravityValue: Int): FrameLayout.Layo
 
 private const val HDR_DETECTION_DIMENSION = 192
 private const val GALLERY_PREVIEW_SCALE = 0.5f
+
+private fun Activity.isDarkMode(): Boolean {
+    return resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+        Configuration.UI_MODE_NIGHT_YES
+}
 
 private fun Activity.dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()

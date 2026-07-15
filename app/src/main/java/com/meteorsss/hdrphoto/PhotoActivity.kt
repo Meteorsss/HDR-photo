@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.ImageDecoder
@@ -28,6 +29,7 @@ import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsetsController
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -74,6 +76,9 @@ class PhotoActivity : Activity() {
         }
         window.statusBarColor = Color.BLACK
         window.navigationBarColor = Color.BLACK
+        val lightBars = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+            WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+        window.insetsController?.setSystemBarsAppearance(0, lightBars)
         buildLayout()
 
         val sessionIndex = GallerySession.index
@@ -252,7 +257,9 @@ class PhotoActivity : Activity() {
         galleryPreview = ImageView(this).apply {
             scaleType = ImageView.ScaleType.FIT_XY
             setImageBitmap(GallerySession.galleryPreview)
-            setBackgroundColor(Color.rgb(245, 248, 252))
+            setBackgroundColor(
+                if (isDarkMode()) Color.rgb(9, 13, 20) else Color.rgb(245, 248, 252),
+            )
         }
         root.addView(galleryPreview, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         dismissScrim = View(this).apply { setBackgroundColor(Color.BLACK) }
@@ -911,6 +918,11 @@ class PhotoActivity : Activity() {
     }
 
     private fun widthOrScreen(): Int = if (root.width > 0) root.width else resources.displayMetrics.widthPixels
+
+    private fun isDarkMode(): Boolean {
+        return resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+            Configuration.UI_MODE_NIGHT_YES
+    }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 

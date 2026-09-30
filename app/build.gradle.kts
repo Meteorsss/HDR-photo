@@ -9,10 +9,10 @@ android {
 
     defaultConfig {
         applicationId = "com.meteorsss.hdrphoto"
-        minSdk = 26
+        minSdk = 34
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 9
+        versionName = "1.1.7"
     }
 
     compileOptions {

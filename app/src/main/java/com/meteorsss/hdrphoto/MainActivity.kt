@@ -6,12 +6,16 @@ import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.ImageDecoder
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
+import android.graphics.drawable.RippleDrawable
+import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -19,9 +23,13 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import android.util.Size
+import android.util.LruCache
 import android.view.Gravity
+import android.view.PixelCopy
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
+import android.view.animation.DecelerateInterpolator
 import android.widget.AbsListView
 import android.widget.BaseAdapter
 import android.widget.FrameLayout
@@ -36,6 +44,9 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingDeque
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import kotlin.math.max
 
 data class PhotoItem(
@@ -61,10 +72,20 @@ data class AlbumItem(
 
 class MainActivity : Activity() {
     private val executor: ExecutorService = Executors.newFixedThreadPool(4)
+    private val hdrQueue = LinkedBlockingDeque<Runnable>()
+    private val hdrExecutor = ThreadPoolExecutor(
+        2,
+        2,
+        0L,
+        TimeUnit.MILLISECONDS,
+        hdrQueue,
+    ).apply { prestartAllCoreThreads() }
+    private val motionExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val allPhotos = mutableListOf<PhotoItem>()
     private val visiblePhotos = mutableListOf<PhotoItem>()
     private val albums = mutableListOf<AlbumItem>()
+    private lateinit var rootView: FrameLayout
     private lateinit var statusText: TextView
     private lateinit var listView: ListView
     private lateinit var photoNav: TextView
@@ -73,18 +94,21 @@ class MainActivity : Activity() {
     private lateinit var photoAdapter: DatedPhotoAdapter
     private lateinit var albumAdapter: AlbumAdapter
     private var currentAlbum: AlbumItem? = null
+    private var openingPhoto = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= 26) {
             window.colorMode = ActivityInfo.COLOR_MODE_WIDE_COLOR_GAMUT
         }
-        window.statusBarColor = Color.WHITE
-        window.navigationBarColor = Color.WHITE
-        if (Build.VERSION.SDK_INT >= 23) {
-            var flags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
-            if (Build.VERSION.SDK_INT >= 26) flags = flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
-            window.decorView.systemUiVisibility = flags
+        val darkMode = isDarkMode()
+        val systemBarColor = if (darkMode) Color.rgb(9, 13, 20) else Color.WHITE
+        window.statusBarColor = systemBarColor
+        window.navigationBarColor = systemBarColor
+        window.decorView.systemUiVisibility = if (darkMode) {
+            0
+        } else {
+            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         }
         buildLayout()
         if (hasImageAccess()) {
@@ -96,6 +120,9 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         executor.shutdownNow()
+        hdrExecutor.shutdownNow()
+        motionExecutor.shutdownNow()
+        if (::tileBinder.isInitialized) tileBinder.clear()
         super.onDestroy()
     }
 
@@ -113,9 +140,9 @@ class MainActivity : Activity() {
     }
 
     private fun buildLayout() {
-        tileBinder = PhotoTileBinder(this, executor, mainHandler)
-        photoAdapter = DatedPhotoAdapter(this, tileBinder) { item ->
-            openPhoto(item)
+        tileBinder = PhotoTileBinder(this, executor, hdrQueue, motionExecutor, mainHandler)
+        photoAdapter = DatedPhotoAdapter(this, tileBinder) { item, sourceView ->
+            openPhoto(item, sourceView)
         }
         albumAdapter = AlbumAdapter(this, albums, tileBinder) { album ->
             showPhotos(album)
@@ -124,6 +151,7 @@ class MainActivity : Activity() {
         val root = FrameLayout(this).apply {
             background = appBackground()
         }
+        rootView = root
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.TRANSPARENT)
@@ -133,7 +161,10 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(18), dp(14), dp(10), dp(14))
-            background = glassBackground(dp(26), Color.argb(190, 255, 255, 255))
+            background = glassBackground(
+                dp(26),
+                if (isDarkMode()) Color.argb(210, 26, 32, 42) else Color.argb(190, 255, 255, 255),
+            )
             elevation = dp(8).toFloat()
         }
 
@@ -141,7 +172,7 @@ class MainActivity : Activity() {
             text = getString(R.string.app_name)
             textSize = 25f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.rgb(16, 22, 32))
+            setTextColor(if (isDarkMode()) Color.rgb(239, 244, 252) else Color.rgb(16, 22, 32))
             setSingleLine(false)
             includeFontPadding = true
         }
@@ -155,8 +186,11 @@ class MainActivity : Activity() {
             textSize = 14f
             gravity = Gravity.CENTER
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.rgb(38, 92, 170))
-            background = glassBackground(dp(20), Color.argb(142, 255, 255, 255))
+            setTextColor(if (isDarkMode()) Color.rgb(126, 177, 255) else Color.rgb(38, 92, 170))
+            background = glassBackground(
+                dp(20),
+                if (isDarkMode()) Color.argb(170, 43, 52, 66) else Color.argb(142, 255, 255, 255),
+            )
             setPadding(dp(16), 0, dp(16), 0)
             elevation = dp(2).toFloat()
             setOnClickListener {
@@ -180,7 +214,7 @@ class MainActivity : Activity() {
         val bottomNav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(dp(8), dp(7), dp(8), dp(7))
+            setPadding(dp(6), dp(6), dp(6), dp(6))
             background = liquidGlassNavBackground()
             elevation = dp(18).toFloat()
             clipToOutline = true
@@ -191,8 +225,8 @@ class MainActivity : Activity() {
         albumNav = buildNavItem("相册") {
             showAlbums()
         }
-        bottomNav.addView(photoNav, LinearLayout.LayoutParams(0, dp(58), 1f))
-        bottomNav.addView(albumNav, LinearLayout.LayoutParams(0, dp(58), 1f))
+        bottomNav.addView(photoNav, LinearLayout.LayoutParams(0, dp(56), 1f).apply { setMargins(dp(1), 0, dp(1), 0) })
+        bottomNav.addView(albumNav, LinearLayout.LayoutParams(0, dp(56), 1f).apply { setMargins(dp(1), 0, dp(1), 0) })
 
         content.addView(
             toolbar,
@@ -222,16 +256,42 @@ class MainActivity : Activity() {
             },
         )
         setContentView(root)
+        root.setOnApplyWindowInsetsListener { view, insets ->
+            val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+            view.setPadding(bars.left, bars.top, bars.right, 0)
+            listView.setPadding(dp(2), dp(4), dp(2), dp(104) + bars.bottom)
+            (bottomNav.layoutParams as FrameLayout.LayoutParams).apply {
+                bottomMargin = dp(14) + bars.bottom
+                bottomNav.layoutParams = this
+            }
+            insets
+        }
+        root.requestApplyInsets()
         updateNavSelection(showingAlbums = false)
     }
 
     private fun buildNavItem(textValue: String, onClick: () -> Unit): TextView {
         return TextView(this).apply {
             text = textValue
-            textSize = 17f
+            textSize = 16f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            setOnClickListener { onClick() }
+            letterSpacing = 0.01f
+            foreground = RippleDrawable(
+                ColorStateList.valueOf(Color.argb(28, 20, 94, 210)),
+                null,
+                GradientDrawable().apply {
+                    setColor(Color.WHITE)
+                    cornerRadius = dp(27).toFloat()
+                },
+            )
+            setOnClickListener {
+                animate().scaleX(0.96f).scaleY(0.96f).setDuration(70L).withEndAction {
+                    animate().scaleX(1f).scaleY(1f).setDuration(210L)
+                        .setInterpolator(DecelerateInterpolator()).start()
+                    onClick()
+                }.start()
+            }
         }
     }
 
@@ -292,17 +352,29 @@ class MainActivity : Activity() {
     }
 
     private fun updateNavSelection(showingAlbums: Boolean) {
-        val selected = Color.rgb(67, 133, 245)
-        val normal = Color.rgb(96, 104, 116)
+        val selected = if (isDarkMode()) Color.rgb(132, 180, 255) else Color.rgb(22, 92, 214)
+        val normal = if (isDarkMode()) Color.rgb(174, 184, 201) else Color.rgb(74, 84, 101)
         photoNav.setTextColor(if (showingAlbums) normal else selected)
         albumNav.setTextColor(if (showingAlbums) selected else normal)
         photoNav.background = if (showingAlbums) null else selectedNavBackground()
         albumNav.background = if (showingAlbums) selectedNavBackground() else null
+        photoNav.animate().alpha(if (showingAlbums) 0.72f else 1f).setDuration(220L).start()
+        albumNav.animate().alpha(if (showingAlbums) 1f else 0.72f).setDuration(220L).start()
     }
 
-    private fun openPhoto(item: PhotoItem) {
+    private fun openPhoto(item: PhotoItem, sourceView: View) {
+        if (openingPhoto) return
+        openingPhoto = true
         val position = visiblePhotos.indexOfFirst { it.uri == item.uri }.coerceAtLeast(0)
         GallerySession.setPhotos(visiblePhotos, position)
+        val location = IntArray(2)
+        sourceView.getLocationOnScreen(location)
+        val sourceBounds = Rect(
+            location[0],
+            location[1],
+            location[0] + sourceView.width,
+            location[1] + sourceView.height,
+        )
         val intent = Intent(this, PhotoActivity::class.java).apply {
             data = item.uri
             item.liveVideoUri?.let {
@@ -310,7 +382,49 @@ class MainActivity : Activity() {
             }
             putExtra(PhotoActivity.EXTRA_MOTION_PHOTO, tileBinder.isMotionPhoto(item))
         }
-        startActivity(intent)
+        captureGalleryPreview { bitmap ->
+            if (isFinishing || isDestroyed) {
+                bitmap?.takeIf { !it.isRecycled }?.recycle()
+                openingPhoto = false
+                return@captureGalleryPreview
+            }
+            GallerySession.setLaunchPreview(bitmap, sourceBounds, item.uri)
+            startActivity(intent)
+            openingPhoto = false
+        }
+    }
+
+    private fun captureGalleryPreview(onCaptured: (Bitmap?) -> Unit) {
+        val width = rootView.width
+        val height = rootView.height
+        if (width <= 0 || height <= 0) {
+            onCaptured(null)
+            return
+        }
+        val bitmap = runCatching {
+            Bitmap.createBitmap(
+                (width * GALLERY_PREVIEW_SCALE).toInt().coerceAtLeast(1),
+                (height * GALLERY_PREVIEW_SCALE).toInt().coerceAtLeast(1),
+                Bitmap.Config.ARGB_8888,
+            )
+        }.getOrNull()
+        if (bitmap == null) {
+            onCaptured(null)
+            return
+        }
+        PixelCopy.request(
+            window,
+            bitmap,
+            { result ->
+                if (result == PixelCopy.SUCCESS) {
+                    onCaptured(bitmap)
+                } else {
+                    bitmap.recycle()
+                    onCaptured(null)
+                }
+            },
+            mainHandler,
+        )
     }
 
     private fun queryImages(): List<PhotoItem> {
@@ -493,14 +607,12 @@ class MainActivity : Activity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun appBackground(): GradientDrawable {
-        return GradientDrawable(
-            GradientDrawable.Orientation.TOP_BOTTOM,
-            intArrayOf(
-                Color.rgb(247, 251, 255),
-                Color.rgb(239, 246, 251),
-                Color.rgb(249, 251, 255),
-            ),
-        )
+        val colors = if (isDarkMode()) {
+            intArrayOf(Color.rgb(9, 13, 20), Color.rgb(14, 20, 30), Color.rgb(8, 12, 19))
+        } else {
+            intArrayOf(Color.rgb(247, 251, 255), Color.rgb(239, 246, 251), Color.rgb(249, 251, 255))
+        }
+        return GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, colors)
     }
 
     private fun glassBackground(radius: Int, fillColor: Int): GradientDrawable {
@@ -508,51 +620,88 @@ class MainActivity : Activity() {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = radius.toFloat()
             setColor(fillColor)
-            setStroke(dp(1), Color.argb(145, 255, 255, 255))
+            setStroke(
+                dp(1),
+                if (isDarkMode()) Color.argb(72, 194, 218, 255) else Color.argb(145, 255, 255, 255),
+            )
         }
     }
 
     private fun selectedNavBackground(): GradientDrawable {
-        return GradientDrawable(
-            GradientDrawable.Orientation.LEFT_RIGHT,
-            intArrayOf(Color.argb(64, 72, 142, 255), Color.argb(42, 42, 205, 225)),
-        ).apply {
-            cornerRadius = dp(22).toFloat()
-            setStroke(dp(1), Color.argb(150, 255, 255, 255))
+        val colors = if (isDarkMode()) {
+            intArrayOf(
+                Color.argb(205, 55, 70, 92),
+                Color.argb(185, 34, 54, 82),
+                Color.argb(195, 48, 63, 86),
+            )
+        } else {
+            intArrayOf(
+                Color.argb(190, 255, 255, 255),
+                Color.argb(118, 225, 239, 255),
+                Color.argb(150, 248, 252, 255),
+            )
+        }
+        return GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, colors).apply {
+            cornerRadius = dp(27).toFloat()
+            setStroke(
+                dp(1),
+                if (isDarkMode()) Color.argb(110, 185, 216, 255) else Color.argb(230, 255, 255, 255),
+            )
         }
     }
 
     private fun liquidGlassNavBackground(): LayerDrawable {
-        val base = GradientDrawable(
-            GradientDrawable.Orientation.TOP_BOTTOM,
+        val baseColors = if (isDarkMode()) {
             intArrayOf(
-                Color.argb(156, 255, 255, 255),
-                Color.argb(92, 246, 251, 255),
-                Color.argb(118, 230, 240, 250),
-            ),
-        ).apply {
+                Color.argb(224, 43, 51, 64),
+                Color.argb(204, 23, 31, 44),
+                Color.argb(218, 14, 21, 33),
+            )
+        } else {
+            intArrayOf(
+                Color.argb(184, 255, 255, 255),
+                Color.argb(108, 238, 247, 255),
+                Color.argb(142, 214, 231, 249),
+            )
+        }
+        val base = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, baseColors).apply {
             cornerRadius = dp(34).toFloat()
-            setStroke(dp(1), Color.argb(190, 255, 255, 255))
+            setStroke(
+                dp(1),
+                if (isDarkMode()) Color.argb(105, 183, 211, 255) else Color.argb(235, 255, 255, 255),
+            )
         }
         val topSheen = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM,
-            intArrayOf(Color.argb(152, 255, 255, 255), Color.argb(18, 255, 255, 255)),
+            if (isDarkMode()) {
+                intArrayOf(Color.argb(72, 220, 235, 255), Color.argb(18, 150, 190, 245), Color.TRANSPARENT)
+            } else {
+                intArrayOf(Color.argb(150, 255, 255, 255), Color.argb(42, 255, 255, 255), Color.TRANSPARENT)
+            },
         ).apply {
             cornerRadius = dp(28).toFloat()
         }
         val coldRefraction = GradientDrawable(
             GradientDrawable.Orientation.LEFT_RIGHT,
-            intArrayOf(
-                Color.argb(24, 76, 137, 255),
-                Color.argb(10, 255, 255, 255),
-                Color.argb(26, 38, 214, 225),
-            ),
+            if (isDarkMode()) {
+                intArrayOf(
+                    Color.argb(54, 68, 129, 220),
+                    Color.argb(12, 170, 205, 255),
+                    Color.argb(58, 37, 118, 216),
+                )
+            } else {
+                intArrayOf(
+                    Color.argb(34, 76, 137, 255),
+                    Color.argb(6, 255, 255, 255),
+                    Color.argb(38, 48, 196, 255),
+                )
+            },
         ).apply {
             cornerRadius = dp(28).toFloat()
         }
         return LayerDrawable(arrayOf(base, coldRefraction, topSheen)).apply {
             setLayerInset(1, dp(5), dp(5), dp(5), dp(5))
-            setLayerInset(2, dp(8), dp(5), dp(8), dp(32))
+            setLayerInset(2, dp(8), dp(5), dp(8), dp(5))
         }
     }
 
@@ -581,7 +730,7 @@ private data class AlbumRow(val items: List<AlbumItem>)
 private class DatedPhotoAdapter(
     private val activity: Activity,
     private val tileBinder: PhotoTileBinder,
-    private val openPhoto: (PhotoItem) -> Unit,
+    private val openPhoto: (PhotoItem, View) -> Unit,
 ) : BaseAdapter() {
     private var rows: List<PhotoListRow> = emptyList()
 
@@ -609,7 +758,7 @@ private class DatedPhotoAdapter(
             text = label
             textSize = 21f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.rgb(17, 24, 38))
+            setTextColor(if (activity.isDarkMode()) Color.rgb(230, 236, 246) else Color.rgb(17, 24, 38))
             gravity = Gravity.CENTER_VERTICAL
             setPadding(activity.dp(20), activity.dp(18), activity.dp(8), activity.dp(9))
             setBackgroundColor(Color.TRANSPARENT)
@@ -655,7 +804,7 @@ private class DatedPhotoAdapter(
         frame.addView(liveBadge, badgeParams(activity, Gravity.TOP or Gravity.START))
 
         if (item != null) {
-            frame.setOnClickListener { openPhoto(item) }
+            frame.setOnClickListener { openPhoto(item, image) }
             tileBinder.bind(image, hdrBadge, liveBadge, item, showLive = true)
         }
         return frame
@@ -788,14 +937,19 @@ private class AlbumAdapter(
 private class PhotoTileBinder(
     private val activity: Activity,
     private val executor: ExecutorService,
+    private val hdrQueue: LinkedBlockingDeque<Runnable>,
+    private val motionExecutor: ExecutorService,
     private val mainHandler: Handler,
 ) {
-    private val thumbCache = ConcurrentHashMap<String, Bitmap>()
+    private val thumbCache = object : LruCache<String, Bitmap>(thumbnailCacheSizeKb()) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount / 1024
+    }
     private val hdrCache = ConcurrentHashMap<String, Boolean>()
     private val motionPhotoCache = ConcurrentHashMap<String, Boolean>()
     private val thumbLoading = ConcurrentHashMap.newKeySet<String>()
     private val hdrLoading = ConcurrentHashMap.newKeySet<String>()
     private val motionPhotoLoading = ConcurrentHashMap.newKeySet<String>()
+    private val hdrStore = activity.getSharedPreferences("ultra-hdr-cache-v1", Activity.MODE_PRIVATE)
 
     fun bind(
         image: ImageView,
@@ -808,7 +962,8 @@ private class PhotoTileBinder(
         image.tag = key
         hdrBadge.tag = key
         liveBadge.tag = key
-        image.setImageBitmap(thumbCache[key])
+        image.setImageBitmap(thumbCache.get(key))
+        restoreHdrResult(item)
         hdrBadge.visibility = if (hdrCache[key] == true) View.VISIBLE else View.GONE
         liveBadge.visibility = if (showLive && isLivePhoto(item)) View.VISIBLE else View.GONE
         loadThumbnailIfNeeded(item, image)
@@ -820,7 +975,7 @@ private class PhotoTileBinder(
 
     private fun loadThumbnailIfNeeded(item: PhotoItem, image: ImageView) {
         val key = item.uri.toString()
-        if (thumbCache.containsKey(key) || !thumbLoading.add(key)) return
+        if (thumbCache.get(key) != null || !thumbLoading.add(key)) return
 
         executor.execute {
             val thumb = runCatching {
@@ -828,7 +983,7 @@ private class PhotoTileBinder(
             }.getOrNull()
 
             if (thumb != null) {
-                thumbCache[key] = thumb
+                thumbCache.put(key, thumb)
                 mainHandler.post {
                     if (image.tag == key) {
                         image.setImageBitmap(thumb)
@@ -843,16 +998,17 @@ private class PhotoTileBinder(
         val key = item.uri.toString()
         if (hdrCache.containsKey(key) || !hdrLoading.add(key)) return
 
-        executor.execute {
+        hdrQueue.offerFirst(Runnable {
             val isHdr = isUltraHdr(item.uri)
             hdrCache[key] = isHdr
+            hdrStore.edit().putBoolean(hdrStoreKey(item), isHdr).apply()
             mainHandler.post {
                 if (hdrBadge.tag == key) {
                     hdrBadge.visibility = if (isHdr) View.VISIBLE else View.GONE
                 }
             }
             hdrLoading.remove(key)
-        }
+        })
     }
 
     private fun detectMotionPhotoIfNeeded(item: PhotoItem, liveBadge: TextView) {
@@ -860,7 +1016,7 @@ private class PhotoTileBinder(
         val key = item.uri.toString()
         if (motionPhotoCache.containsKey(key) || !motionPhotoLoading.add(key)) return
 
-        executor.execute {
+        motionExecutor.execute {
             val isMotionPhoto = MotionPhotoSupport.hasMotionPhotoMetadata(activity, item.uri)
             motionPhotoCache[key] = isMotionPhoto
             mainHandler.post {
@@ -878,12 +1034,37 @@ private class PhotoTileBinder(
             val source = ImageDecoder.createSource(activity.contentResolver, uri)
             val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
                 val longestSide = max(info.size.width, info.size.height)
-                val sample = max(1, longestSide / 768)
+                val sample = max(1, longestSide / HDR_DETECTION_DIMENSION)
                 decoder.setTargetSampleSize(sample)
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
             }
-            bitmap.gainmap != null
+            val result = bitmap.gainmap != null
+            bitmap.recycle()
+            result
         }.getOrDefault(false)
+    }
+
+    private fun restoreHdrResult(item: PhotoItem) {
+        val key = item.uri.toString()
+        if (hdrCache.containsKey(key)) return
+        val storedKey = hdrStoreKey(item)
+        if (hdrStore.contains(storedKey)) hdrCache[key] = hdrStore.getBoolean(storedKey, false)
+    }
+
+    private fun hdrStoreKey(item: PhotoItem): String {
+        return "${item.uri}|${item.sizeBytes}|${item.dateMillis}"
+    }
+
+    fun clear() {
+        thumbCache.evictAll()
+        hdrCache.clear()
+        motionPhotoCache.clear()
+    }
+
+    private fun thumbnailCacheSizeKb(): Int {
+        val maxMemoryKb = (Runtime.getRuntime().maxMemory() / 1024L)
+            .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        return (maxMemoryKb / 8).coerceIn(16 * 1024, 96 * 1024)
     }
 
     private fun isLivePhoto(item: PhotoItem): Boolean {
@@ -896,7 +1077,9 @@ private fun buildBadge(activity: Activity, textValue: String): TextView {
         text = textValue
         textSize = 12f
         typeface = Typeface.DEFAULT_BOLD
-        setTextColor(Color.rgb(52, 58, 66))
+        setTextColor(
+            if (activity.isDarkMode()) Color.rgb(224, 233, 246) else Color.rgb(52, 58, 66),
+        )
         background = badgeGlassBackground(activity)
         setPadding(activity.dp(7), activity.dp(3), activity.dp(7), activity.dp(3))
         visibility = View.GONE
@@ -907,8 +1090,13 @@ private fun mediaTileBackground(activity: Activity): GradientDrawable {
     return GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
         cornerRadius = activity.dp(8).toFloat()
-        setColor(Color.argb(126, 255, 255, 255))
-        setStroke(activity.dp(1), Color.argb(138, 255, 255, 255))
+        setColor(
+            if (activity.isDarkMode()) Color.argb(210, 29, 36, 47) else Color.argb(126, 255, 255, 255),
+        )
+        setStroke(
+            activity.dp(1),
+            if (activity.isDarkMode()) Color.argb(78, 173, 201, 238) else Color.argb(138, 255, 255, 255),
+        )
     }
 }
 
@@ -926,8 +1114,13 @@ private fun badgeGlassBackground(activity: Activity): GradientDrawable {
     return GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
         cornerRadius = activity.dp(5).toFloat()
-        setColor(Color.argb(190, 236, 240, 244))
-        setStroke(activity.dp(1), Color.argb(150, 255, 255, 255))
+        setColor(
+            if (activity.isDarkMode()) Color.argb(218, 38, 47, 61) else Color.argb(190, 236, 240, 244),
+        )
+        setStroke(
+            activity.dp(1),
+            if (activity.isDarkMode()) Color.argb(96, 189, 215, 248) else Color.argb(150, 255, 255, 255),
+        )
     }
 }
 
@@ -939,6 +1132,14 @@ private fun badgeParams(activity: Activity, gravityValue: Int): FrameLayout.Layo
     ).apply {
         setMargins(activity.dp(6), activity.dp(6), activity.dp(6), 0)
     }
+}
+
+private const val HDR_DETECTION_DIMENSION = 192
+private const val GALLERY_PREVIEW_SCALE = 0.5f
+
+private fun Activity.isDarkMode(): Boolean {
+    return resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+        Configuration.UI_MODE_NIGHT_YES
 }
 
 private fun Activity.dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()

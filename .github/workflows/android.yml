@@ -1,28 +1,39 @@
-name: Build Android APK
+﻿name: Build Android APK
 
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-v1.1.7
+  cancel-in-progress: false
+
 jobs:
-  debug-apk:
-    runs-on: ubuntu-latest
+  release-apk:
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE_COMMIT: 756b4d59b5af2b2a2eb47ca898ec146e3edfc917
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout exact 1.1.7 source
+        uses: actions/checkout@v5
+        with:
+          ref: 756b4d59b5af2b2a2eb47ca898ec146e3edfc917
+          persist-credentials: false
 
       - name: Set up JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
 
       - name: Install Android 16 SDK
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
@@ -32,12 +43,49 @@ jobs:
         with:
           gradle-version: "8.13"
 
-      - name: Lint and build debug APK
-        run: gradle --no-daemon lintDebug assembleDebug
+      - name: Verify source and build on GitHub
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          grep -F 'versionName = "1.1.7"' app/build.gradle.kts
+          grep -F 'versionCode = 9' app/build.gradle.kts
+          gradle --no-daemon lintDebug assembleDebug
 
-      - name: Upload APK artifact
+      - name: Package and verify APK and source
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/HDR-Photo-1.1.7.apk
+          git archive --format=zip --prefix=HDR-photo-1.1.7/ --output=dist/HDR-photo-1.1.7-source.zip "$SOURCE_COMMIT"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging dist/HDR-Photo-1.1.7.apk > dist/APK-METADATA.txt
+          grep -E "package:.*name='com.meteorsss.hdrphoto'.*versionCode='9'.*versionName='1.1.7'" dist/APK-METADATA.txt
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs dist/HDR-Photo-1.1.7.apk > dist/APK-SIGNATURE.txt
+          cat dist/APK-SIGNATURE.txt
+          {
+            echo "Application: HDR Photo"
+            echo "Version: 1.1.7"
+            echo "Version-Code: 9"
+            echo "Build-Type: debug (project's existing build configuration)"
+            echo "Source-Commit: $SOURCE_COMMIT"
+            echo "Build-Workflow-Commit: $GITHUB_SHA"
+            echo "Build-URL: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "Minimum-Android: 14 (API 34)"
+            echo "Target-Android: 16 (API 36)"
+          } > dist/BUILD-INFO.txt
+          (cd dist && sha256sum HDR-Photo-1.1.7.apk HDR-photo-1.1.7-source.zip APK-METADATA.txt APK-SIGNATURE.txt BUILD-INFO.txt > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+      - name: Upload release files
         uses: actions/upload-artifact@v4
         with:
-          name: hdr-photo-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: hdr-photo-v1.1.7-release
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hdr-photo-v1.1.7-check-reports
+          path: app/build/reports/lint-results-debug.*
+          if-no-files-found: ignore
           retention-days: 14

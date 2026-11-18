@@ -23,6 +23,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
 
       - name: Install Android 16 SDK
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
@@ -33,7 +36,7 @@ jobs:
           gradle-version: "8.13"
 
       - name: Lint and build debug APK
-        run: gradle --no-daemon lintDebug assembleDebug
+        run: gradle --no-daemon testDebugUnitTest lintDebug assembleDebug
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

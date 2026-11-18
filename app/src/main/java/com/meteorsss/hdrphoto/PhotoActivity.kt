@@ -67,6 +67,22 @@ class PhotoActivity : Activity() {
     private var singlePointerGesture = false
     private var dismissDragActive = false
     private var dismissAnimating = false
+    private var held: Pair<android.graphics.Bitmap, android.graphics.Gainmap>? = null
+    private var ignoreUntilUp = false
+    private lateinit var detailScroll: ScrollView
+    private val detailBack = android.window.OnBackInvokedCallback { hideDetails() }
+    private var detailOutside = false
+    private var detailAtTop = false
+    private var detailSingle = false
+    private lateinit var neighbor: ImageView
+    private val previewExecutor = Executors.newSingleThreadExecutor()
+    // Only two screen previews, never two additional full-resolution HDR originals.
+    private val previews = android.util.LruCache<Uri, android.graphics.Bitmap>(3)
+    @Volatile private var previewEpoch = 0
+    private var dragDelta = 0f
+    private var dragReady = false
+    private var displayedUri: Uri? = null
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -90,6 +106,14 @@ class PhotoActivity : Activity() {
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         if (dismissAnimating) return true
+        if (detailsPanel.visibility == View.VISIBLE) return dispatchDetails(event)
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) ignoreUntilUp = false
+        if (held != null || ignoreUntilUp) {
+            if (event.actionMasked in intArrayOf(MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN)) {
+                releaseSdr(); ignoreUntilUp = true
+            }
+            return true
+        }
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 imageView.animate().cancel()
@@ -100,6 +124,7 @@ class PhotoActivity : Activity() {
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 singlePointerGesture = false
+                resetPageDrag()
                 if (dismissDragActive) restoreDismissDrag()
             }
         }
@@ -110,7 +135,7 @@ class PhotoActivity : Activity() {
         var navigationHandled = false
         when (event.actionMasked) {
             MotionEvent.ACTION_MOVE -> {
-                if (singlePointerGesture) navigationHandled = updateDismissDrag(dx, dy)
+                if (singlePointerGesture) navigationHandled = updatePageDrag(dx, dy) || updateDismissDrag(dx, dy)
             }
             MotionEvent.ACTION_UP -> {
                 if (singlePointerGesture) {
@@ -118,12 +143,15 @@ class PhotoActivity : Activity() {
                         completeDismissDrag(dy)
                         true
                     } else {
-                        handleGallerySwipe(dx, dy)
+                        val handled = handleGallerySwipe(dx, dy)
+                        resetPageDrag()
+                        handled
                     }
                 }
                 singlePointerGesture = false
             }
             MotionEvent.ACTION_CANCEL -> {
+                resetPageDrag()
                 if (dismissDragActive) restoreDismissDrag()
                 singlePointerGesture = false
             }
@@ -239,12 +267,100 @@ class PhotoActivity : Activity() {
     }
 
     override fun onDestroy() {
-        stopVideo()
+        loadToken.incrementAndGet(); previewEpoch++
+        releaseSdr(); hideDetails(); stopVideo()
+        MotionPhotoSupport.discard(liveVideoUri)
+        previewExecutor.shutdownNow()
         videoSurface?.release()
         executor.shutdownNow()
         galleryPreview.setImageBitmap(null)
         GallerySession.clearLaunchPreview()
         super.onDestroy()
+    }
+
+    override fun onPause() { releaseSdr(); super.onPause() }
+
+    private fun holdSdr() {
+        if (!singlePointerGesture || dragReady || dismissDragActive || dismissAnimating || detailsPanel.visibility == View.VISIBLE || mediaPlayer != null || displayedUri != currentItem?.uri) return
+        val bitmap = (imageView.drawable as? BitmapDrawable)?.bitmap ?: return
+        val map = bitmap.gainmap ?: return
+        held = bitmap to map
+        bitmap.gainmap = null // Keep base pixels, color space and zoom matrix unchanged.
+        window.colorMode = ActivityInfo.COLOR_MODE_DEFAULT
+        imageView.invalidate()
+        imageView.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+    }
+
+    private fun releaseSdr() {
+        val (bitmap, map) = held ?: return
+        bitmap.gainmap = map; held = null
+        window.colorMode = ActivityInfo.COLOR_MODE_HDR
+        imageView.invalidate()
+    }
+
+    private fun resetPageDrag() {
+        dragReady = false; dragDelta = 0f
+        if (!dismissDragActive) imageView.translationX = 0f
+        neighbor.visibility = View.GONE; neighbor.setImageDrawable(null)
+    }
+
+    private fun prefetchNeighbors() {
+        val epoch = ++previewEpoch
+        for (delta in listOf(1,-1)) {
+            val uri = GallerySession.photos.getOrNull(GallerySession.index+delta)?.uri ?: continue
+            if (previews.get(uri) != null) continue
+            val width = widthOrScreen().coerceIn(256, 1080)
+            previewExecutor.execute {
+                if (epoch != previewEpoch) return@execute
+                val thumb = runCatching { contentResolver.loadThumbnail(uri, android.util.Size(width,width),null) }.getOrNull() ?: return@execute
+                mainHandler.post { if (!isDestroyed && epoch == previewEpoch) {
+                    previews.put(uri,thumb)
+                    if (dragDelta != 0f) updatePageDrag(dragDelta, 0f)
+                } }
+            }
+        }
+    }
+
+    private fun updatePageDrag(dx: Float, dy: Float): Boolean {
+        if (imageView.isZoomed() || mediaPlayer != null || dismissDragActive || dx == 0f || kotlin.math.abs(dx) < dp(6) || kotlin.math.abs(dx) < kotlin.math.abs(dy)*1.25f) return false
+        val step = if (dx < 0) 1 else -1
+        val item = GallerySession.photos.getOrNull(GallerySession.index + step)
+        if (item == null) { resetPageDrag(); return false }
+        dragDelta = dx; val thumb = previews.get(item.uri) ?: return true
+        dragReady = true
+        val width = widthOrScreen().toFloat(); val pos = dx.coerceIn(-width,width)
+        if (neighbor.tag != item.uri || neighbor.drawable == null) { neighbor.setImageBitmap(thumb); neighbor.tag = item.uri }
+        neighbor.translationX = pos + step*width
+        imageView.translationX = pos; neighbor.visibility = View.VISIBLE
+        return true
+    }
+
+    private fun hideDetails() {
+        if (!::detailsPanel.isInitialized || detailsPanel.visibility != View.VISIBLE) return
+        detailsPanel.visibility = View.GONE
+        onBackInvokedDispatcher.unregisterOnBackInvokedCallback(detailBack)
+    }
+
+    private fun dispatchDetails(e: MotionEvent): Boolean {
+        val panelTop = IntArray(2); detailsPanel.getLocationOnScreen(panelTop)
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                detailSingle = true; detailOutside = e.rawY < panelTop[1]; detailAtTop = !detailScroll.canScrollVertically(-1)
+                gestureStartX=e.rawX; gestureStartY=e.rawY
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> detailSingle = false
+            MotionEvent.ACTION_UP -> {
+                val dx=kotlin.math.abs(e.rawX-gestureStartX); val dy=e.rawY-gestureStartY
+                val slop=android.view.ViewConfiguration.get(this).scaledTouchSlop
+                if (detailSingle && ((detailOutside && dx < slop && kotlin.math.abs(dy) < slop) ||
+                    ((detailOutside || detailAtTop) && dy > dp(42) && dy > dx*1.2f))) {
+                    if (!detailOutside) { val cancel=MotionEvent.obtain(e); cancel.action=MotionEvent.ACTION_CANCEL; super.dispatchTouchEvent(cancel); cancel.recycle() }
+                    hideDetails(); return true
+                }
+            }
+        }
+        if (!detailOutside) super.dispatchTouchEvent(e)
+        return true
     }
 
     private fun buildLayout() {
@@ -261,7 +377,10 @@ class PhotoActivity : Activity() {
         root.addView(galleryPreview, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         dismissScrim = View(this).apply { setBackgroundColor(Color.BLACK) }
         root.addView(dismissScrim, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        neighbor = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER; visibility = View.GONE }
+        root.addView(neighbor, -1, -1)
         imageView = ZoomImageView(this).apply {
+            hold = ::holdSdr
             setBackgroundColor(Color.TRANSPARENT)
         }
         root.addView(imageView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
@@ -376,7 +495,7 @@ class PhotoActivity : Activity() {
                 typeface = Typeface.DEFAULT_BOLD
                 setTextColor(Color.rgb(198, 218, 255))
                 setPadding(dp(12), dp(8), dp(4), dp(8))
-                setOnClickListener { detailsPanel.visibility = View.GONE }
+                setOnClickListener { hideDetails() }
             },
         )
         panel.addView(header)
@@ -386,7 +505,7 @@ class PhotoActivity : Activity() {
             setPadding(0, dp(10), 0, 0)
         }
         panel.addView(
-            ScrollView(this).apply {
+            ScrollView(this).also { detailScroll = it }.apply {
                 addView(detailsList)
             },
             LinearLayout.LayoutParams(
@@ -414,6 +533,8 @@ class PhotoActivity : Activity() {
     private fun loadCurrent(direction: Int) {
         val item = currentItem ?: return
         val token = loadToken.incrementAndGet()
+        releaseSdr()
+        resetPageDrag()
         dismissDragActive = false
         dismissAnimating = false
         imageView.animate().cancel()
@@ -424,56 +545,40 @@ class PhotoActivity : Activity() {
         imageView.alpha = 1f
         dismissScrim.alpha = 1f
         stopVideo()
-        detailsPanel.visibility = View.GONE
+        MotionPhotoSupport.discard(liveVideoUri)
+        hideDetails()
         liveButton.visibility = View.GONE
         liveButton.text = "LIVE"
         liveVideoUri = null
         pendingVideoUri = null
         scheduleLoadingIndicator(item, token)
-        if (direction == 0) {
-            imageView.setImageDrawable(null)
-        } else {
-            imageView.animate()
-                .translationX(-direction * widthOrScreen() * 0.16f)
-                .alpha(0f)
-                .setDuration(120L)
-                .withEndAction {
-                    if (token == loadToken.get()) imageView.setImageDrawable(null)
-                }
-                .start()
+        val preview = previews.get(item.uri)
+        if (direction != 0 && preview != null) {
+            imageView.setImageBitmap(preview)
+            displayedUri = null // Do not compare an SDR thumbnail.
         }
-
-        setupLivePhoto(item, token)
+        prefetchNeighbors()
         executor.execute {
+            if (token != loadToken.get()) return@execute
             val drawable = decodeDrawable(item.uri)
             mainHandler.post {
-                if (token != loadToken.get()) return@post
-                loading.tag = null
-                loading.visibility = View.GONE
-                if (drawable == null) {
-                    finish()
+                if (token != loadToken.get() || isDestroyed) return@post
+                loading.tag = null; loading.visibility = View.GONE
+                if (drawable != null) {
+                    imageView.setImageDrawable(drawable); displayedUri = item.uri
                 } else {
-                    if (direction != 0) {
-                        imageView.translationX = direction * widthOrScreen() * 0.18f
-                        imageView.alpha = 0f
-                    }
-                    imageView.setImageDrawable(drawable)
-                    if (direction != 0) {
-                        imageView.animate()
-                            .translationX(0f)
-                            .alpha(1f)
-                            .setDuration(180L)
-                            .start()
-                    } else {
-                        imageView.translationX = 0f
-                        imageView.alpha = 1f
-                    }
+                    // An inaccessible item must not be mislabelled as the preceding photo.
+                    displayedUri = null
+                    if (preview == null) imageView.setImageDrawable(null)
+                    loading.text = "无法读取此照片，可滑到下一张"; loading.visibility = View.VISIBLE
                 }
             }
         }
+        setupLivePhoto(item, token)
     }
 
     private fun scheduleLoadingIndicator(item: PhotoItem, token: Int) {
+        loading.text = getString(R.string.loading)
         loading.tag = token
         loading.visibility = View.GONE
         val delay = if (item.sizeBytes >= LARGE_PHOTO_BYTES) 0L else LOADING_DELAY_MS
@@ -498,9 +603,9 @@ class PhotoActivity : Activity() {
                 return
             }
         }
-        val knownMotionPhoto = intent.getBooleanExtra(EXTRA_MOTION_PHOTO, false)
+        val knownMotionPhoto = item.uri == intent.data && intent.getBooleanExtra(EXTRA_MOTION_PHOTO, false)
         executor.execute {
-            if (knownMotionPhoto || MotionPhotoSupport.hasMotionPhotoMetadata(this, item.uri)) {
+            if (token == loadToken.get() && (knownMotionPhoto || MotionPhotoSupport.hasMotionPhotoMetadata(this, item.uri))) {
                 val extracted = MotionPhotoSupport.extractEmbeddedVideo(this, item.uri)
                 if (extracted != null) {
                     mainHandler.post { setLiveVideo(extracted, token) }
@@ -514,7 +619,7 @@ class PhotoActivity : Activity() {
     }
 
     private fun setLiveVideo(uri: Uri, token: Int) {
-        if (token != loadToken.get()) return
+        if (token != loadToken.get() || isDestroyed) { MotionPhotoSupport.discard(uri); return }
         liveVideoUri = uri
         liveButton.visibility = View.VISIBLE
     }
@@ -629,7 +734,9 @@ class PhotoActivity : Activity() {
     private fun showDetails() {
         val item = currentItem ?: return
         detailsList.removeAllViews()
+        if (detailsPanel.visibility != View.VISIBLE) onBackInvokedDispatcher.registerOnBackInvokedCallback(0, detailBack)
         detailsPanel.visibility = View.VISIBLE
+        detailScroll.scrollTo(0,0)
         addDetail("文件名", item.name.ifBlank { item.uri.lastPathSegment.orEmpty() })
         addDetail("位置", item.name.ifBlank { item.uri.lastPathSegment.orEmpty() })
         addDetail("像素", if (item.width > 0 && item.height > 0) "${item.width} x ${item.height}" else "未知")

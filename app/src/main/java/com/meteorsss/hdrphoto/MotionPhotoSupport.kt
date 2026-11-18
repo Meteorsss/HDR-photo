@@ -1,104 +1,71 @@
-package com.meteorsss.hdrphoto
+﻿package com.meteorsss.hdrphoto
 
 import android.content.Context
 import android.net.Uri
 import java.io.File
-import kotlin.math.max
+import java.io.FileInputStream
 
 object MotionPhotoSupport {
-    private val markers = listOf(
-        "MotionPhoto",
-        "MicroVideo",
-        "Camera:MotionPhoto",
-        "MotionPhoto_Data",
-        "video/mp4",
-    )
-    private val ftyp = byteArrayOf(0x66, 0x74, 0x79, 0x70)
-
-    fun hasMotionPhotoMetadata(context: Context, uri: Uri): Boolean {
-        return runCatching {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                val buffer = ByteArray(512 * 1024)
-                val read = input.read(buffer)
-                if (read <= 0) {
-                    false
-                } else {
-                    val header = String(buffer, 0, read, Charsets.ISO_8859_1)
-                    markers.any { marker -> header.contains(marker, ignoreCase = true) }
-                }
-            } ?: false
-        }.getOrDefault(false)
-    }
-
-    fun extractEmbeddedVideo(context: Context, uri: Uri): Uri? {
-        return runCatching {
-            val outputDir = File(context.cacheDir, "motion-photo").apply { mkdirs() }
-            val output = File(outputDir, "${Integer.toHexString(uri.toString().hashCode())}.mp4")
-            if (output.exists()) output.delete()
-
-            val start = findMp4Start(context, uri) ?: return null
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                skipFully(input, start)
-                output.outputStream().use { fileOut ->
-                    input.copyTo(fileOut)
-                }
-            } ?: return null
-            if (output.length() > 32) Uri.fromFile(output) else null
-        }.getOrNull()
-    }
-
-    private fun findMp4Start(context: Context, uri: Uri): Long? {
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            val buffer = ByteArray(256 * 1024)
-            var tail = ByteArray(0)
-            var absolute = 0L
-
-            while (true) {
-                val read = input.read(buffer)
-                if (read <= 0) break
-                val combined = ByteArray(tail.size + read)
-                tail.copyInto(combined)
-                buffer.copyInto(combined, tail.size, 0, read)
-                val base = absolute - tail.size
-                val index = indexOf(combined, ftyp)
-                if (index >= 0) {
-                    val ftypPosition = base + index
-                    val mp4Start = ftypPosition - 4
-                    if (mp4Start >= 0) return mp4Start
-                }
-
-                val keep = minOf(32, combined.size)
-                tail = combined.copyOfRange(combined.size - keep, combined.size)
-                absolute += read
+    private fun <T> read(context: Context, uri: Uri, block: (FileInputStream, Long, Long) -> T): T? = runCatching {
+        context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { fd ->
+            fd.createInputStream().use { input ->
+                val total = fd.length.takeIf { it >= 0 } ?: (input.channel.size() - fd.startOffset)
+                if (total < 28) null else block(input, fd.startOffset, total)
             }
+        }
+    }.getOrNull()
+
+    /** Return a validated video range, never the still image's own ftyp (HEIC/AVIF). */
+    private fun range(input: FileInputStream, base: Long, total: Long): Pair<Long, Long>? {
+        val bytes = ByteArray(minOf(total, 512L*1024).toInt())
+        val reader = java.io.DataInputStream(input)
+        reader.readFully(bytes)
+        val length = MotionLayout.videoLength(String(bytes, Charsets.ISO_8859_1))
+        if (length != null && length < total) {
+            val start = base + total - length
+            input.channel.position(start)
+            val box = ByteArray(12); reader.readFully(box)
+            if (MotionLayout.isVideoBox(box, length)) return start to length
+        }
+        // Samsung SEF uses MotionPhoto_Data immediately before its embedded MP4.
+        // Check the footer first; ordinary stills must not trigger a whole-file scan.
+        val footer = ByteArray(4); input.channel.position(base + total - 4); reader.readFully(footer)
+        if (String(footer, Charsets.US_ASCII) != "SEFT") return null
+        val marker = "MotionPhoto_Data".toByteArray(Charsets.US_ASCII)
+        val block = ByteArray(65536 + marker.size + 12); var pos = 0L
+        while (pos < total) {
+            input.channel.position(base + pos)
+            val n = minOf(block.size.toLong(), total-pos).toInt(); reader.readFully(block, 0, n)
+            for (i in 0..n-marker.size-12) {
+                if (block[i] != marker[0] || !marker.indices.all { block[i+it] == marker[it] }) continue
+                val k = i+marker.size; val start = pos+k
+                if (MotionLayout.isVideoBox(block.copyOfRange(k,k+12), total-start)) return (base+start) to (total-start)
+            }
+            pos += 65536
         }
         return null
     }
 
-    private fun indexOf(bytes: ByteArray, target: ByteArray): Int {
-        if (target.isEmpty() || bytes.size < target.size) return -1
-        for (i in 0..bytes.size - target.size) {
-            var matched = true
-            for (j in target.indices) {
-                if (bytes[i + j] != target[j]) {
-                    matched = false
-                    break
+    fun hasMotionPhotoMetadata(context: Context, uri: Uri): Boolean =
+        read(context, uri) { stream, base, total -> range(stream, base, total) != null } == true
+
+    fun extractEmbeddedVideo(context: Context, uri: Uri): Uri? = read(context, uri) { input, base, total ->
+        val (start, length) = range(input, base, total) ?: return@read null
+        val dir = File(context.cacheDir, "motion-photo").apply { mkdirs() }
+        val out = File.createTempFile("live-", ".mp4", dir)
+        var ok = false
+        try {
+            input.channel.position(start)
+            out.outputStream().use { sink ->
+                val buf = ByteArray(65536); var remaining = length
+                while (remaining > 0) {
+                    val n = input.read(buf, 0, minOf(remaining, buf.size.toLong()).toInt())
+                    if (n <= 0 || Thread.currentThread().isInterrupted) return@read null
+                    sink.write(buf, 0, n); remaining -= n
                 }
             }
-            if (matched) return i
-        }
-        return -1
+            ok = true; Uri.fromFile(out)
+        } finally { if (!ok) out.delete() }
     }
-
-    private fun skipFully(input: java.io.InputStream, bytes: Long) {
-        var remaining = max(0L, bytes)
-        while (remaining > 0) {
-            val skipped = input.skip(remaining)
-            if (skipped <= 0) {
-                if (input.read() == -1) break else remaining--
-            } else {
-                remaining -= skipped
-            }
-        }
-    }
+    fun discard(uri: Uri?) { if (uri?.scheme == "file") uri.path?.let { File(it).delete() } }
 }

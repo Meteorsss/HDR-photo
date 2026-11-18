@@ -13,7 +13,6 @@ import android.graphics.Rect
 import android.graphics.ImageDecoder
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
 import android.content.res.ColorStateList
 import android.net.Uri
@@ -29,7 +28,6 @@ import android.view.PixelCopy
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
-import android.view.animation.DecelerateInterpolator
 import android.widget.AbsListView
 import android.widget.BaseAdapter
 import android.widget.FrameLayout
@@ -93,7 +91,15 @@ class MainActivity : Activity() {
     private lateinit var tileBinder: PhotoTileBinder
     private lateinit var photoAdapter: DatedPhotoAdapter
     private lateinit var albumAdapter: AlbumAdapter
-    private var currentAlbum: AlbumItem? = null
+    private var route = GalleryRoute()
+    private val scrollPositions = mutableMapOf<String, Pair<Int, Int>>()
+    private var displayedRoute: GalleryRoute? = null
+    private lateinit var bottomNav: GlassTabs
+    private lateinit var accessButton: TextView
+    private var generation = 0
+    private var awaitingPermission = false
+    private var wasPaused = false
+    private val albumBack = android.window.OnBackInvokedCallback { navigate(GalleryRoute(albums = true)) }
     private var openingPhoto = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -110,12 +116,30 @@ class MainActivity : Activity() {
         } else {
             View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         }
+        route = GalleryRoute(savedInstanceState?.getBoolean("albums") ?: false, savedInstanceState?.getString("bucket"))
+        savedInstanceState?.let { scrollPositions[route.key] = it.getInt("row") to it.getInt("top") }
         buildLayout()
-        if (hasImageAccess()) {
-            loadPhotos()
-        } else {
+        if (hasImageAccess()) loadPhotos() else {
             showPermissionPrompt()
+            if (!getPreferences(MODE_PRIVATE).getBoolean("asked", false)) requestImageAccess()
         }
+    }
+
+    override fun onSaveInstanceState(out: Bundle) {
+        super.onSaveInstanceState(out)
+        rememberScroll()
+        out.putBoolean("albums", route.albums)
+        out.putString("bucket", route.bucket)
+        scrollPositions[route.key]?.let { out.putInt("row", it.first); out.putInt("top", it.second) }
+    }
+
+    override fun onPause() { wasPaused = true; super.onPause() }
+    override fun onResume() {
+        super.onResume()
+        if (wasPaused && !awaitingPermission) {
+            if (hasImageAccess()) loadPhotos() else showPermissionPrompt()
+        }
+        wasPaused = false
     }
 
     override fun onDestroy() {
@@ -132,6 +156,7 @@ class MainActivity : Activity() {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_IMAGES) awaitingPermission = false
         if (requestCode == REQUEST_IMAGES && hasImageAccess()) {
             loadPhotos()
         } else if (requestCode == REQUEST_IMAGES) {
@@ -145,14 +170,14 @@ class MainActivity : Activity() {
             openPhoto(item, sourceView)
         }
         albumAdapter = AlbumAdapter(this, albums, tileBinder) { album ->
-            showPhotos(album)
+            navigate(GalleryRoute(true, album.id))
         }
 
         val root = FrameLayout(this).apply {
             background = appBackground()
         }
         rootView = root
-        val content = LinearLayout(this).apply {
+        val content = GlassSource(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.TRANSPARENT)
         }
@@ -181,6 +206,14 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
         )
 
+        accessButton = TextView(this).apply {
+            text = "管理照片"
+            gravity = Gravity.CENTER
+            setPadding(dp(8), 0, dp(8), 0)
+            setTextColor(if (this@MainActivity.isDarkMode()) Color.WHITE else Color.rgb(22, 92, 190))
+            setOnClickListener { requestImageAccess() }
+        }
+        toolbar.addView(accessButton, LinearLayout.LayoutParams(-2, dp(48)))
         val refreshButton = TextView(this).apply {
             text = getString(R.string.refresh)
             textSize = 14f
@@ -202,7 +235,7 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)),
         )
 
-        listView = ListView(this).apply {
+        listView = TabSwipeList(this) { albums -> navigate(GalleryRoute(albums)) }.apply {
             setBackgroundColor(Color.TRANSPARENT)
             divider = null
             cacheColorHint = Color.TRANSPARENT
@@ -211,22 +244,10 @@ class MainActivity : Activity() {
             adapter = photoAdapter
         }
 
-        val bottomNav = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(dp(6), dp(6), dp(6), dp(6))
-            background = liquidGlassNavBackground()
-            elevation = dp(18).toFloat()
-            clipToOutline = true
-        }
-        photoNav = buildNavItem("照片") {
-            showPhotos(null)
-        }
-        albumNav = buildNavItem("相册") {
-            showAlbums()
-        }
-        bottomNav.addView(photoNav, LinearLayout.LayoutParams(0, dp(56), 1f).apply { setMargins(dp(1), 0, dp(1), 0) })
-        bottomNav.addView(albumNav, LinearLayout.LayoutParams(0, dp(56), 1f).apply { setMargins(dp(1), 0, dp(1), 0) })
+        bottomNav = GlassTabs(this, content, isDarkMode()) { albums -> navigate(GalleryRoute(albums)) }
+        photoNav = buildNavItem("照片") { navigate(GalleryRoute()) }
+        albumNav = buildNavItem("相册") { navigate(GalleryRoute(true)) }
+        bottomNav.installLabels(photoNav, albumNav)
 
         content.addView(
             toolbar,
@@ -267,7 +288,8 @@ class MainActivity : Activity() {
             insets
         }
         root.requestApplyInsets()
-        updateNavSelection(showingAlbums = false)
+        updateNavSelection(route.albums)
+        updateAccessButton()
     }
 
     private fun buildNavItem(textValue: String, onClick: () -> Unit): TextView {
@@ -285,87 +307,94 @@ class MainActivity : Activity() {
                     cornerRadius = dp(27).toFloat()
                 },
             )
-            setOnClickListener {
-                animate().scaleX(0.96f).scaleY(0.96f).setDuration(70L).withEndAction {
-                    animate().scaleX(1f).scaleY(1f).setDuration(210L)
-                        .setInterpolator(DecelerateInterpolator()).start()
-                    onClick()
-                }.start()
-            }
+            isFocusable = true
+            setOnClickListener { onClick() }
         }
+    }
+
+    private fun updateAccessButton() {
+        val full = checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+        accessButton.visibility = if (full) View.GONE else View.VISIBLE
+        accessButton.text = if (hasImageAccess()) "管理可见照片" else "授权"
     }
 
     private fun showPermissionPrompt() {
-        allPhotos.clear()
-        visiblePhotos.clear()
-        albums.clear()
-        photoAdapter.submit(visiblePhotos)
-        albumAdapter.notifyDataSetChanged()
+        generation++
+        allPhotos.clear(); albums.clear(); visiblePhotos.clear()
+        photoAdapter.submit(emptyList()); albumAdapter.notifyDataSetChanged()
+        updateAccessButton()
         statusText.text = getString(R.string.permission_needed)
-        requestImageAccess()
     }
 
     private fun loadPhotos() {
-        statusText.text = getString(R.string.loading)
+        val request = ++generation
+        updateAccessButton()
+        if (displayedRoute == null) statusText.text = getString(R.string.loading)
         executor.execute {
-            val loaded = queryImages()
-            val loadedAlbums = buildAlbums(loaded)
+            val loaded = try { queryImages() } catch (_: SecurityException) { null }
+            val loadedAlbums = loaded?.let(::buildAlbums)
             mainHandler.post {
-                allPhotos.clear()
-                allPhotos.addAll(loaded)
-                albums.clear()
-                albums.addAll(loadedAlbums)
-                albumAdapter.notifyDataSetChanged()
-                currentAlbum = null
-                showPhotos(null)
+                if (isDestroyed || isFinishing || request != generation) return@post
+                if (loaded == null || loadedAlbums == null) { showPermissionPrompt(); return@post }
+                rememberScroll()
+                allPhotos.clear(); allPhotos.addAll(loaded)
+                albums.clear(); albums.addAll(loadedAlbums)
+                // Resolve the route at delivery, not when refresh was requested.
+                render(route.afterRefresh(albums.map { it.id }.toSet()))
             }
         }
     }
 
-    private fun showPhotos(album: AlbumItem?) {
-        currentAlbum = album
-        visiblePhotos.clear()
-        visiblePhotos.addAll(
-            if (album == null) {
-                allPhotos
-            } else {
-                allPhotos.filter { it.bucketId == album.id }
-            },
-        )
-        photoAdapter.submit(visiblePhotos)
-        listView.adapter = photoAdapter
-        listView.setSelection(0)
-        statusText.text = if (visiblePhotos.isEmpty()) {
-            getString(R.string.empty_gallery)
-        } else {
-            val title = album?.name ?: "照片"
-            "$title\n${visiblePhotos.size} 张照片"
-        }
-        updateNavSelection(showingAlbums = false)
+    private fun rememberScroll() {
+        displayedRoute?.let { if (listView.childCount > 0) scrollPositions[it.key] = listView.firstVisiblePosition to listView.getChildAt(0).top }
     }
 
-    private fun showAlbums() {
-        listView.adapter = albumAdapter
-        listView.setSelection(0)
-        statusText.text = "相册\n${albums.size} 个相册"
-        updateNavSelection(showingAlbums = true)
+    private fun navigate(next: GalleryRoute) {
+        if (next == displayedRoute) { bottomNav.select(next.albums); return }
+        rememberScroll()
+        render(next)
+    }
+
+    private fun render(next: GalleryRoute) {
+        val wasNested = displayedRoute?.bucket != null
+        route = next
+        displayedRoute = next
+        if (wasNested != (next.bucket != null)) {
+            if (next.bucket != null) onBackInvokedDispatcher.registerOnBackInvokedCallback(0, albumBack)
+            else onBackInvokedDispatcher.unregisterOnBackInvokedCallback(albumBack)
+        }
+        if (next.albums && next.bucket == null) {
+            albumAdapter.notifyDataSetChanged()
+            if (listView.adapter !== albumAdapter) listView.adapter = albumAdapter
+            statusText.text = "相册\n${albums.size} 个相册"
+        } else {
+            val album = albums.firstOrNull { it.id == next.bucket }
+            visiblePhotos.clear()
+            visiblePhotos.addAll(if (album == null) allPhotos else allPhotos.filter { it.albumKey() == album.id })
+            photoAdapter.submit(visiblePhotos)
+            if (listView.adapter !== photoAdapter) listView.adapter = photoAdapter
+            statusText.text = if (visiblePhotos.isEmpty()) getString(R.string.empty_gallery)
+                else "${album?.name ?: "照片"}\n${visiblePhotos.size} 张照片"
+        }
+        scrollPositions[next.key].let { listView.setSelectionFromTop(it?.first ?: 0, it?.second ?: listView.paddingTop) }
+        if (!hasImageAccess()) statusText.text = getString(R.string.permission_needed)
+        updateNavSelection(next.albums)
     }
 
     private fun updateNavSelection(showingAlbums: Boolean) {
-        val selected = if (isDarkMode()) Color.rgb(132, 180, 255) else Color.rgb(22, 92, 214)
-        val normal = if (isDarkMode()) Color.rgb(174, 184, 201) else Color.rgb(74, 84, 101)
+        val selected = if (isDarkMode()) Color.rgb(223, 238, 255) else Color.rgb(12, 64, 150)
+        val normal = if (isDarkMode()) Color.rgb(212, 220, 230) else Color.rgb(48, 58, 72)
+        photoNav.isSelected = !showingAlbums; albumNav.isSelected = showingAlbums
         photoNav.setTextColor(if (showingAlbums) normal else selected)
         albumNav.setTextColor(if (showingAlbums) selected else normal)
-        photoNav.background = if (showingAlbums) null else selectedNavBackground()
-        albumNav.background = if (showingAlbums) selectedNavBackground() else null
-        photoNav.animate().alpha(if (showingAlbums) 0.72f else 1f).setDuration(220L).start()
-        albumNav.animate().alpha(if (showingAlbums) 1f else 0.72f).setDuration(220L).start()
+        bottomNav.select(showingAlbums)
     }
 
     private fun openPhoto(item: PhotoItem, sourceView: View) {
         if (openingPhoto) return
         openingPhoto = true
-        val position = visiblePhotos.indexOfFirst { it.uri == item.uri }.coerceAtLeast(0)
+        val position = visiblePhotos.indexOfFirst { it.uri == item.uri }
+        if (position < 0) { openingPhoto = false; return }
         GallerySession.setPhotos(visiblePhotos, position)
         val location = IntArray(2)
         sourceView.getLocationOnScreen(location)
@@ -507,7 +536,7 @@ class MainActivity : Activity() {
     }
 
     private fun buildAlbums(items: List<PhotoItem>): List<AlbumItem> {
-        return items.groupBy { it.bucketId.ifBlank { it.bucketName.ifBlank { "unknown" } } }
+        return items.groupBy { it.albumKey() }
             .mapNotNull { (bucketId, albumPhotos) ->
                 val cover = albumPhotos.maxByOrNull { it.dateMillis } ?: return@mapNotNull null
                 AlbumItem(
@@ -581,6 +610,9 @@ class MainActivity : Activity() {
     }
 
     private fun requestImageAccess() {
+        if (awaitingPermission) return
+        awaitingPermission = true
+        getPreferences(MODE_PRIVATE).edit().putBoolean("asked", true).apply()
         val permissions = mutableListOf<String>()
         when {
             Build.VERSION.SDK_INT >= 34 -> {
@@ -627,88 +659,12 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun selectedNavBackground(): GradientDrawable {
-        val colors = if (isDarkMode()) {
-            intArrayOf(
-                Color.argb(205, 55, 70, 92),
-                Color.argb(185, 34, 54, 82),
-                Color.argb(195, 48, 63, 86),
-            )
-        } else {
-            intArrayOf(
-                Color.argb(190, 255, 255, 255),
-                Color.argb(118, 225, 239, 255),
-                Color.argb(150, 248, 252, 255),
-            )
-        }
-        return GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, colors).apply {
-            cornerRadius = dp(27).toFloat()
-            setStroke(
-                dp(1),
-                if (isDarkMode()) Color.argb(110, 185, 216, 255) else Color.argb(230, 255, 255, 255),
-            )
-        }
-    }
-
-    private fun liquidGlassNavBackground(): LayerDrawable {
-        val baseColors = if (isDarkMode()) {
-            intArrayOf(
-                Color.argb(224, 43, 51, 64),
-                Color.argb(204, 23, 31, 44),
-                Color.argb(218, 14, 21, 33),
-            )
-        } else {
-            intArrayOf(
-                Color.argb(184, 255, 255, 255),
-                Color.argb(108, 238, 247, 255),
-                Color.argb(142, 214, 231, 249),
-            )
-        }
-        val base = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, baseColors).apply {
-            cornerRadius = dp(34).toFloat()
-            setStroke(
-                dp(1),
-                if (isDarkMode()) Color.argb(105, 183, 211, 255) else Color.argb(235, 255, 255, 255),
-            )
-        }
-        val topSheen = GradientDrawable(
-            GradientDrawable.Orientation.TOP_BOTTOM,
-            if (isDarkMode()) {
-                intArrayOf(Color.argb(72, 220, 235, 255), Color.argb(18, 150, 190, 245), Color.TRANSPARENT)
-            } else {
-                intArrayOf(Color.argb(150, 255, 255, 255), Color.argb(42, 255, 255, 255), Color.TRANSPARENT)
-            },
-        ).apply {
-            cornerRadius = dp(28).toFloat()
-        }
-        val coldRefraction = GradientDrawable(
-            GradientDrawable.Orientation.LEFT_RIGHT,
-            if (isDarkMode()) {
-                intArrayOf(
-                    Color.argb(54, 68, 129, 220),
-                    Color.argb(12, 170, 205, 255),
-                    Color.argb(58, 37, 118, 216),
-                )
-            } else {
-                intArrayOf(
-                    Color.argb(34, 76, 137, 255),
-                    Color.argb(6, 255, 255, 255),
-                    Color.argb(38, 48, 196, 255),
-                )
-            },
-        ).apply {
-            cornerRadius = dp(28).toFloat()
-        }
-        return LayerDrawable(arrayOf(base, coldRefraction, topSheen)).apply {
-            setLayerInset(1, dp(5), dp(5), dp(5), dp(5))
-            setLayerInset(2, dp(8), dp(5), dp(8), dp(5))
-        }
-    }
-
     companion object {
         private const val REQUEST_IMAGES = 2001
     }
 }
+
+private fun PhotoItem.albumKey() = bucketId.ifBlank { bucketName.ifBlank { "unknown" } }
 
 private fun livePairKey(name: String, path: String): String {
     val folder = if (Build.VERSION.SDK_INT >= 29) {
@@ -748,8 +704,8 @@ private class DatedPhotoAdapter(
 
     override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
         return when (val row = rows[position]) {
-            is PhotoListRow.Header -> buildHeader(row.label)
-            is PhotoListRow.Photos -> buildPhotoRow(row.items)
+            is PhotoListRow.Header -> (convertView as? TextView)?.apply { text = row.label } ?: buildHeader(row.label)
+            is PhotoListRow.Photos -> bindPhotoRow((convertView as? LinearLayout) ?: buildPhotoRow(), row.items)
         }
     }
 
@@ -765,16 +721,15 @@ private class DatedPhotoAdapter(
         }
     }
 
-    private fun buildPhotoRow(items: List<PhotoItem>): View {
+    private fun buildPhotoRow(): LinearLayout {
         val row = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(activity.dp(4), 0, activity.dp(4), 0)
             setBackgroundColor(Color.TRANSPARENT)
         }
         val size = ((activity.resources.displayMetrics.widthPixels - activity.dp(20)) / 3f).toInt()
-        repeat(3) { index ->
-            val item = items.getOrNull(index)
-            val cell = buildPhotoCell(size, item)
+        repeat(3) {
+            val cell = buildPhotoCell(size)
             row.addView(
                 cell,
                 LinearLayout.LayoutParams(0, size, 1f).apply {
@@ -785,13 +740,13 @@ private class DatedPhotoAdapter(
         return row
     }
 
-    private fun buildPhotoCell(size: Int, item: PhotoItem?): View {
+    private fun buildPhotoCell(size: Int): View {
         val frame = FrameLayout(activity).apply {
             layoutParams = AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, size)
             background = mediaTileBackground(activity)
             elevation = activity.dp(1).toFloat()
             clipToOutline = true
-            visibility = if (item == null) View.INVISIBLE else View.VISIBLE
+
         }
         val image = ImageView(activity).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
@@ -803,11 +758,26 @@ private class DatedPhotoAdapter(
         val liveBadge = buildBadge(activity, "LIVE")
         frame.addView(liveBadge, badgeParams(activity, Gravity.TOP or Gravity.START))
 
-        if (item != null) {
-            frame.setOnClickListener { openPhoto(item, image) }
-            tileBinder.bind(image, hdrBadge, liveBadge, item, showLive = true)
-        }
         return frame
+    }
+
+    private fun bindPhotoRow(row: LinearLayout, items: List<PhotoItem>): View {
+        repeat(3) { i ->
+            val frame = row.getChildAt(i) as FrameLayout
+            val item = items.getOrNull(i)
+            frame.visibility = if (item == null) View.INVISIBLE else View.VISIBLE
+            val image = frame.getChildAt(0) as ImageView
+            if (item == null) {
+                frame.setOnClickListener(null)
+                repeat(frame.childCount) { frame.getChildAt(it).tag = null }
+                image.setImageDrawable(null)
+            } else {
+                frame.contentDescription = item.name
+                frame.setOnClickListener { openPhoto(item, image) }
+                tileBinder.bind(image, frame.getChildAt(1) as TextView, frame.getChildAt(2) as TextView, item, true)
+            }
+        }
+        return row
     }
 
     private fun buildRows(items: List<PhotoItem>): List<PhotoListRow> {
@@ -946,9 +916,13 @@ private class PhotoTileBinder(
     }
     private val hdrCache = ConcurrentHashMap<String, Boolean>()
     private val motionPhotoCache = ConcurrentHashMap<String, Boolean>()
-    private val thumbLoading = ConcurrentHashMap.newKeySet<String>()
-    private val hdrLoading = ConcurrentHashMap.newKeySet<String>()
-    private val motionPhotoLoading = ConcurrentHashMap.newKeySet<String>()
+    // Only current bindings are retained. One completed URI notifies all live recipients.
+    private val images = java.util.WeakHashMap<ImageView, String>()
+    private val hdrLabels = java.util.WeakHashMap<TextView, String>()
+    private val liveLabels = java.util.WeakHashMap<TextView, String>()
+    private val thumbLoading = mutableSetOf<String>()
+    private val hdrLoading = mutableSetOf<String>()
+    private val motionPhotoLoading = mutableSetOf<String>()
     private val hdrStore = activity.getSharedPreferences("ultra-hdr-cache-v1", Activity.MODE_PRIVATE)
 
     fun bind(
@@ -959,6 +933,8 @@ private class PhotoTileBinder(
         showLive: Boolean,
     ) {
         val key = item.uri.toString()
+        images[image] = key; hdrLabels[hdrBadge] = key
+        if (showLive) liveLabels[liveBadge] = key else liveLabels.remove(liveBadge)
         image.tag = key
         hdrBadge.tag = key
         liveBadge.tag = key
@@ -966,14 +942,14 @@ private class PhotoTileBinder(
         restoreHdrResult(item)
         hdrBadge.visibility = if (hdrCache[key] == true) View.VISIBLE else View.GONE
         liveBadge.visibility = if (showLive && isLivePhoto(item)) View.VISIBLE else View.GONE
-        loadThumbnailIfNeeded(item, image)
-        detectHdrIfNeeded(item, hdrBadge)
-        if (showLive) detectMotionPhotoIfNeeded(item, liveBadge)
+        loadThumbnailIfNeeded(item)
+        detectHdrIfNeeded(item)
+        if (showLive) detectMotionPhotoIfNeeded(item)
     }
 
     fun isMotionPhoto(item: PhotoItem): Boolean = motionPhotoCache[item.uri.toString()] == true
 
-    private fun loadThumbnailIfNeeded(item: PhotoItem, image: ImageView) {
+    private fun loadThumbnailIfNeeded(item: PhotoItem) {
         val key = item.uri.toString()
         if (thumbCache.get(key) != null || !thumbLoading.add(key)) return
 
@@ -982,53 +958,49 @@ private class PhotoTileBinder(
                 activity.contentResolver.loadThumbnail(item.uri, Size(512, 512), null)
             }.getOrNull()
 
-            if (thumb != null) {
-                thumbCache.put(key, thumb)
-                mainHandler.post {
-                    if (image.tag == key) {
-                        image.setImageBitmap(thumb)
-                    }
+            mainHandler.post {
+                thumbLoading.remove(key)
+                if (thumb != null && !activity.isDestroyed) {
+                    thumbCache.put(key, thumb)
+                    images.forEach { (v, k) -> if (k == key && v.tag == k) v.setImageBitmap(thumb) }
                 }
             }
-            thumbLoading.remove(key)
         }
     }
 
-    private fun detectHdrIfNeeded(item: PhotoItem, hdrBadge: TextView) {
+    private fun detectHdrIfNeeded(item: PhotoItem) {
         val key = item.uri.toString()
         if (hdrCache.containsKey(key) || !hdrLoading.add(key)) return
 
         hdrQueue.offerFirst(Runnable {
             val isHdr = isUltraHdr(item.uri)
-            hdrCache[key] = isHdr
-            hdrStore.edit().putBoolean(hdrStoreKey(item), isHdr).apply()
             mainHandler.post {
-                if (hdrBadge.tag == key) {
-                    hdrBadge.visibility = if (isHdr) View.VISIBLE else View.GONE
-                }
+                hdrLoading.remove(key)
+                if (activity.isDestroyed || isHdr == null) return@post
+                hdrCache[key] = isHdr
+                hdrStore.edit().putBoolean(hdrStoreKey(item), isHdr).apply()
+                hdrLabels.forEach { (v,k) -> if (k == key && v.tag == k) v.visibility = if (isHdr) View.VISIBLE else View.GONE }
             }
-            hdrLoading.remove(key)
         })
     }
 
-    private fun detectMotionPhotoIfNeeded(item: PhotoItem, liveBadge: TextView) {
+    private fun detectMotionPhotoIfNeeded(item: PhotoItem) {
         if (item.liveVideoUri != null) return
         val key = item.uri.toString()
         if (motionPhotoCache.containsKey(key) || !motionPhotoLoading.add(key)) return
 
         motionExecutor.execute {
             val isMotionPhoto = MotionPhotoSupport.hasMotionPhotoMetadata(activity, item.uri)
-            motionPhotoCache[key] = isMotionPhoto
             mainHandler.post {
-                if (liveBadge.tag == key) {
-                    liveBadge.visibility = if (isMotionPhoto) View.VISIBLE else View.GONE
-                }
+                motionPhotoLoading.remove(key)
+                if (activity.isDestroyed) return@post
+                motionPhotoCache[key] = isMotionPhoto
+                liveLabels.forEach { (v,k) -> if (k == key && v.tag == k) v.visibility = if (isMotionPhoto) View.VISIBLE else View.GONE }
             }
-            motionPhotoLoading.remove(key)
         }
     }
 
-    private fun isUltraHdr(uri: Uri): Boolean {
+    private fun isUltraHdr(uri: Uri): Boolean? {
         if (Build.VERSION.SDK_INT < 34) return false
         return runCatching {
             val source = ImageDecoder.createSource(activity.contentResolver, uri)
@@ -1041,7 +1013,7 @@ private class PhotoTileBinder(
             val result = bitmap.gainmap != null
             bitmap.recycle()
             result
-        }.getOrDefault(false)
+        }.getOrNull()
     }
 
     private fun restoreHdrResult(item: PhotoItem) {
@@ -1056,6 +1028,7 @@ private class PhotoTileBinder(
     }
 
     fun clear() {
+        images.clear(); hdrLabels.clear(); liveLabels.clear()
         thumbCache.evictAll()
         hdrCache.clear()
         motionPhotoCache.clear()

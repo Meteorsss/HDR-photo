@@ -81,6 +81,9 @@ class PhotoActivity : Activity() {
     @Volatile private var previewEpoch = 0
     private var dragDelta = 0f
     private var dragReady = false
+    private var pageAnimator: android.animation.ValueAnimator? = null
+    private var pendingStep = 0
+    private val missingPreviews = mutableSetOf<Uri>()
     private var displayedUri: Uri? = null
 
 
@@ -105,7 +108,12 @@ class PhotoActivity : Activity() {
     }
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-        if (dismissAnimating) return true
+        if (dismissAnimating || pageAnimator != null) return true
+        if (pendingStep != 0) {
+            if (event.actionMasked != MotionEvent.ACTION_DOWN) return true
+            // A new gesture may cancel a slow, still pending preview.
+            pendingStep = 0; resetPageDrag()
+        }
         if (detailsPanel.visibility == View.VISIBLE) return dispatchDetails(event)
         if (event.actionMasked == MotionEvent.ACTION_DOWN) ignoreUntilUp = false
         if (held != null || ignoreUntilUp) {
@@ -143,15 +151,13 @@ class PhotoActivity : Activity() {
                         completeDismissDrag(dy)
                         true
                     } else {
-                        val handled = handleGallerySwipe(dx, dy)
-                        resetPageDrag()
-                        handled
+                        handleGallerySwipe(dx, dy)
                     }
                 }
                 singlePointerGesture = false
             }
             MotionEvent.ACTION_CANCEL -> {
-                resetPageDrag()
+                returnPageToCenter()
                 if (dismissDragActive) restoreDismissDrag()
                 singlePointerGesture = false
             }
@@ -254,10 +260,11 @@ class PhotoActivity : Activity() {
         if (detailsPanel.visibility == View.VISIBLE || imageView.isZoomed() || mediaPlayer != null) return false
         val horizontal = kotlin.math.abs(dx) > kotlin.math.abs(dy) * SWIPE_DIRECTION_BIAS
         if (horizontal && kotlin.math.abs(dx) >= dp(HORIZONTAL_SWIPE_DP)) {
-            if (dx < 0f) showAdjacent(1) else showAdjacent(-1)
+            settlePage(if (dx < 0f) 1 else -1)
             return true
         }
 
+        if (dragReady || dragDelta != 0f) { returnPageToCenter(); return true }
         val vertical = kotlin.math.abs(dy) > kotlin.math.abs(dx) * SWIPE_DIRECTION_BIAS
         if (vertical && -dy >= dp(VERTICAL_SWIPE_DP)) {
             showDetails()
@@ -278,7 +285,11 @@ class PhotoActivity : Activity() {
         super.onDestroy()
     }
 
-    override fun onPause() { releaseSdr(); super.onPause() }
+    override fun onPause() {
+        pendingStep = 0
+        pageAnimator?.removeAllListeners(); pageAnimator?.cancel(); pageAnimator = null
+        resetPageDrag(); releaseSdr(); super.onPause()
+    }
 
     private fun holdSdr() {
         if (!singlePointerGesture || dragReady || dismissDragActive || dismissAnimating || detailsPanel.visibility == View.VISIBLE || mediaPlayer != null || displayedUri != currentItem?.uri) return
@@ -306,33 +317,101 @@ class PhotoActivity : Activity() {
 
     private fun prefetchNeighbors() {
         val epoch = ++previewEpoch
+        missingPreviews.clear()
         for (delta in listOf(1,-1)) {
-            val uri = GallerySession.photos.getOrNull(GallerySession.index+delta)?.uri ?: continue
+            val uri = GallerySession.photos.getOrNull(GallerySession.index + delta)?.uri ?: continue
             if (previews.get(uri) != null) continue
-            val width = widthOrScreen().coerceIn(256, 1080)
+            val edge = widthOrScreen().coerceIn(256, 1080)
             previewExecutor.execute {
                 if (epoch != previewEpoch) return@execute
-                val thumb = runCatching { contentResolver.loadThumbnail(uri, android.util.Size(width,width),null) }.getOrNull() ?: return@execute
-                mainHandler.post { if (!isDestroyed && epoch == previewEpoch) {
-                    previews.put(uri,thumb)
-                    if (dragDelta != 0f) updatePageDrag(dragDelta, 0f)
-                } }
+                // Preserve aspect ratio and avoid replacing a square crop with a full-size photo.
+                val bitmap = runCatching {
+                    ImageDecoder.decodeBitmap(ImageDecoder.createSource(contentResolver, uri)) { decoder, info, _ ->
+                        val longest = maxOf(info.size.width, info.size.height)
+                        decoder.setTargetSampleSize(((longest + edge - 1) / edge).coerceAtLeast(1))
+                    }
+                }.getOrNull() ?: runCatching { contentResolver.loadThumbnail(uri, android.util.Size(edge, edge), null) }.getOrNull()
+                mainHandler.post {
+                    if (isDestroyed || epoch != previewEpoch) return@post
+                    if (bitmap != null) previews.put(uri, bitmap) else missingPreviews.add(uri)
+                    if (pendingStep == delta) settlePage(delta)
+                    else if (singlePointerGesture && pageAnimator == null && dragDelta != 0f) updatePageDrag(dragDelta, 0f)
+                }
             }
         }
     }
 
-    private fun updatePageDrag(dx: Float, dy: Float): Boolean {
-        if (imageView.isZoomed() || mediaPlayer != null || dismissDragActive || dx == 0f || kotlin.math.abs(dx) < dp(6) || kotlin.math.abs(dx) < kotlin.math.abs(dy)*1.25f) return false
-        val step = if (dx < 0) 1 else -1
-        val item = GallerySession.photos.getOrNull(GallerySession.index + step)
-        if (item == null) { resetPageDrag(); return false }
-        dragDelta = dx; val thumb = previews.get(item.uri) ?: return true
-        dragReady = true
-        val width = widthOrScreen().toFloat(); val pos = dx.coerceIn(-width,width)
-        if (neighbor.tag != item.uri || neighbor.drawable == null) { neighbor.setImageBitmap(thumb); neighbor.tag = item.uri }
-        neighbor.translationX = pos + step*width
-        imageView.translationX = pos; neighbor.visibility = View.VISIBLE
+    private fun bindNeighbor(step: Int): Boolean {
+        val uri = GallerySession.photos.getOrNull(GallerySession.index + step)?.uri ?: return false
+        val thumb = previews.get(uri)
+        if (thumb == null && uri !in missingPreviews) return false
+        if (neighbor.tag != uri || neighbor.drawable == null) {
+            if (thumb != null) neighbor.setImageBitmap(thumb) else neighbor.setImageResource(android.R.drawable.ic_dialog_alert)
+            neighbor.tag = uri
+        }
+        neighbor.visibility = View.VISIBLE
         return true
+    }
+
+    private fun positionPages(step: Int, offset: Float, width: Float) {
+        imageView.translationX = offset
+        neighbor.translationX = PageSlide.neighborOffset(step, width, offset)
+    }
+
+    private fun updatePageDrag(dx: Float, dy: Float): Boolean {
+        if (imageView.isZoomed() || mediaPlayer != null || dismissDragActive) return false
+        if (!dragReady && (kotlin.math.abs(dx) < dp(6) || kotlin.math.abs(dx) < kotlin.math.abs(dy)*1.25f)) return false
+        if (dx == 0f) { resetPageDrag(); return true }
+        val step = if (dx < 0) 1 else -1
+        if (GallerySession.photos.getOrNull(GallerySession.index + step) == null) { resetPageDrag(); return true }
+        val width = widthOrScreen().coerceAtLeast(1).toFloat()
+        dragDelta = dx
+        if (!bindNeighbor(step)) {
+            // Direction reversed into an uncached neighbor: don't reveal an empty edge.
+            imageView.translationX = 0f; neighbor.visibility = View.GONE; dragReady = false
+            return true
+        }
+        dragReady = true
+        positionPages(step, dx.coerceIn(-width, width), width)
+        return true
+    }
+
+    private fun returnPageToCenter() {
+        pendingStep = 0
+        if (!dragReady || imageView.translationX == 0f) { resetPageDrag(); return }
+        val step = if (imageView.translationX < 0) 1 else -1
+        animatePage(step, commit = false)
+    }
+
+    private fun settlePage(step: Int) {
+        if (GallerySession.photos.getOrNull(GallerySession.index + step) == null) { returnPageToCenter(); return }
+        if (!bindNeighbor(step)) { pendingStep = step; return }
+        pendingStep = 0
+        animatePage(step, commit = true)
+    }
+
+    private fun animatePage(step: Int, commit: Boolean) {
+        val width = widthOrScreen().coerceAtLeast(1).toFloat()
+        val from = if (imageView.translationX * step <= 0) imageView.translationX else 0f
+        val to = if (commit) PageSlide.targetOffset(step, width) else 0f
+        positionPages(step, from, width)
+        pageAnimator = android.animation.ValueAnimator.ofFloat(from, to).apply {
+            duration = PageSlide.duration(from, to, width)
+            interpolator = android.view.animation.DecelerateInterpolator(1.25f)
+            addUpdateListener { positionPages(step, it.animatedValue as Float, width) }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    pageAnimator = null
+                    if (commit) {
+                        // Hand off the very same visible preview in this frame, then upgrade in place.
+                        val landed = neighbor.drawable
+                        imageView.setImageDrawable(landed); displayedUri = null
+                        loadAt(GallerySession.index + step, step)
+                    } else resetPageDrag()
+                }
+            })
+        }
+        pageAnimator?.start()
     }
 
     private fun hideDetails() {
@@ -524,12 +603,6 @@ class PhotoActivity : Activity() {
         loadCurrent(direction)
     }
 
-    private fun showAdjacent(offset: Int) {
-        val next = GallerySession.index + offset
-        if (next !in GallerySession.photos.indices) return
-        loadAt(next, offset)
-    }
-
     private fun loadCurrent(direction: Int) {
         val item = currentItem ?: return
         val token = loadToken.incrementAndGet()
@@ -551,12 +624,10 @@ class PhotoActivity : Activity() {
         liveButton.text = "LIVE"
         liveVideoUri = null
         pendingVideoUri = null
-        scheduleLoadingIndicator(item, token)
         val preview = previews.get(item.uri)
-        if (direction != 0 && preview != null) {
-            imageView.setImageBitmap(preview)
-            displayedUri = null // Do not compare an SDR thumbnail.
-        }
+        if (direction == 0 || preview == null) scheduleLoadingIndicator(item, token)
+        else { loading.tag = null; loading.visibility = View.GONE }
+
         prefetchNeighbors()
         executor.execute {
             if (token != loadToken.get()) return@execute

@@ -58,6 +58,7 @@ data class PhotoItem(
     val dateMillis: Long = 0L,
     val bucketId: String = "",
     val bucketName: String = "",
+    val modifiedSeconds: Long = 0,
 )
 
 data class AlbumItem(
@@ -80,7 +81,12 @@ class MainActivity : Activity() {
     ).apply { prestartAllCoreThreads() }
     private val motionExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val allPhotos = mutableListOf<PhotoItem>()
+    private var allPhotos: List<PhotoItem> = emptyList()
+    private var hasSnapshot = false
+    private var manualRefresh = false
+    private lateinit var refreshButton: TextView
+    private lateinit var refreshResult: TextView
+    private val clearResult = Runnable { refreshResult.visibility = View.GONE }
     private val visiblePhotos = mutableListOf<PhotoItem>()
     private val albums = mutableListOf<AlbumItem>()
     private lateinit var rootView: FrameLayout
@@ -143,6 +149,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacks(clearResult)
         executor.shutdownNow()
         hdrExecutor.shutdownNow()
         motionExecutor.shutdownNow()
@@ -214,7 +221,8 @@ class MainActivity : Activity() {
             setOnClickListener { requestImageAccess() }
         }
         toolbar.addView(accessButton, LinearLayout.LayoutParams(-2, dp(48)))
-        val refreshButton = TextView(this).apply {
+        refreshButton = TextView(this).apply {
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
             text = getString(R.string.refresh)
             textSize = 14f
             gravity = Gravity.CENTER
@@ -227,7 +235,10 @@ class MainActivity : Activity() {
             setPadding(dp(16), 0, dp(16), 0)
             elevation = dp(2).toFloat()
             setOnClickListener {
-                if (hasImageAccess()) loadPhotos() else requestImageAccess()
+                if (hasImageAccess()) loadPhotos(manual = true) else {
+                    android.widget.Toast.makeText(this@MainActivity, "需要照片访问权限才能刷新", android.widget.Toast.LENGTH_SHORT).show()
+                    requestImageAccess()
+                }
             }
         }
         toolbar.addView(
@@ -276,11 +287,24 @@ class MainActivity : Activity() {
                 setMargins(dp(22), 0, dp(22), dp(18))
             },
         )
+        refreshResult = TextView(this).apply {
+            visibility = View.GONE
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            setTextColor(Color.WHITE); gravity = Gravity.CENTER
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            background = glassBackground(dp(18), Color.argb(238, 35, 46, 65))
+        }
+        root.addView(refreshResult, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            setMargins(dp(12), 0, dp(12), dp(94))
+        })
         setContentView(root)
         root.setOnApplyWindowInsetsListener { view, insets ->
             val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
             view.setPadding(bars.left, bars.top, bars.right, 0)
             listView.setPadding(dp(2), dp(4), dp(2), dp(104) + bars.bottom)
+            (refreshResult.layoutParams as FrameLayout.LayoutParams).let { params ->
+                params.bottomMargin = bars.bottom + dp(94); refreshResult.layoutParams = params
+            }
             (bottomNav.layoutParams as FrameLayout.LayoutParams).apply {
                 bottomMargin = dp(14) + bars.bottom
                 bottomNav.layoutParams = this
@@ -320,29 +344,62 @@ class MainActivity : Activity() {
 
     private fun showPermissionPrompt() {
         generation++
-        allPhotos.clear(); albums.clear(); visiblePhotos.clear()
+        manualRefresh = false; hasSnapshot = false
+        refreshButton.isEnabled = true; refreshButton.text = getString(R.string.refresh)
+        allPhotos = emptyList(); albums.clear(); visiblePhotos.clear()
         photoAdapter.submit(emptyList()); albumAdapter.notifyDataSetChanged()
         updateAccessButton()
         statusText.text = getString(R.string.permission_needed)
     }
 
-    private fun loadPhotos() {
+    private fun loadPhotos(manual: Boolean = false) {
+        if (manualRefresh) return // A resume callback must not silence an explicit refresh.
         val request = ++generation
+        val previous = allPhotos // Immutable snapshot from the preceding successful query.
+        val scope = route
+        val hadBaseline = hasSnapshot
+        val started = android.os.SystemClock.uptimeMillis()
+        manualRefresh = manual
         updateAccessButton()
-        if (displayedRoute == null) statusText.text = getString(R.string.loading)
+        if (manual) {
+            mainHandler.removeCallbacks(clearResult); clearResult.run()
+            refreshButton.text = "刷新中…"
+            refreshButton.isEnabled = false
+        } else if (displayedRoute == null) statusText.text = getString(R.string.loading)
         executor.execute {
-            val loaded = try { queryImages() } catch (_: SecurityException) { null }
-            val loadedAlbums = loaded?.let(::buildAlbums)
-            mainHandler.post {
-                if (isDestroyed || isFinishing || request != generation) return@post
-                if (loaded == null || loadedAlbums == null) { showPermissionPrompt(); return@post }
-                rememberScroll()
-                allPhotos.clear(); allPhotos.addAll(loaded)
-                albums.clear(); albums.addAll(loadedAlbums)
-                // Resolve the route at delivery, not when refresh was requested.
-                render(route.afterRefresh(albums.map { it.id }.toSet()))
-            }
+            val result = runCatching { queryImages().let { it to buildAlbums(it) } }
+            val summary = if (manual) result.getOrNull()?.let { (items, _) ->
+                val title = if (scope.bucket != null) "此相册" else if (scope.albums) "相册列表" else "照片列表"
+                fun scoped(list: List<PhotoItem>) = if (scope.bucket == null) list else list.filter { it.albumKey() == scope.bucket }
+                if (hadBaseline) RefreshChanges.compare(scoped(previous), scoped(items)) { it.uri }.describe(title)
+                else "$title 已刷新，共 ${scoped(items).size} 张照片"
+            } else null
+            // Keep the acknowledgement legible on a fast query without blocking the UI thread.
+            mainHandler.postAtTime({
+                if (!isDestroyed && !isFinishing && request == generation) {
+                    manualRefresh = false
+                    refreshButton.isEnabled = true
+                    refreshButton.text = getString(R.string.refresh)
+                    result.onSuccess { (loaded, loadedAlbums) ->
+                        rememberScroll()
+                        allPhotos = loaded; hasSnapshot = true
+                        albums.clear(); albums.addAll(loadedAlbums)
+                        render(route.afterRefresh(albums.map { it.id }.toSet()))
+                        if (summary != null) refreshNotice(summary)
+                    }.onFailure { error ->
+                        if (error is SecurityException) showPermissionPrompt()
+                        val message = if (error is SecurityException) "刷新失败，请检查照片访问权限" else "刷新失败，请重试"
+                        if (manual) refreshNotice(message) else if (!hasSnapshot) statusText.text = message
+                    }
+                }
+            }, started + if (manual) 550L else 0L)
         }
+    }
+
+    private fun refreshNotice(message: String) {
+        mainHandler.removeCallbacks(clearResult)
+        refreshResult.text = message; refreshResult.visibility = View.VISIBLE
+        mainHandler.postDelayed(clearResult, 3500L)
     }
 
     private fun rememberScroll() {
@@ -481,7 +538,8 @@ class MainActivity : Activity() {
         } else {
             projection += MediaStore.Images.Media.DATA
         }
-        contentResolver.query(collection, projection.toTypedArray(), null, null, null)?.use { cursor ->
+        (contentResolver.query(collection, projection.toTypedArray(), null, null, null)
+            ?: throw IllegalStateException("MediaStore is unavailable")).use { cursor ->
             val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
             val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
             val widthColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.WIDTH)
@@ -514,6 +572,7 @@ class MainActivity : Activity() {
                     height = cursor.getInt(heightColumn),
                     liveVideoUri = videoPairs[livePairKey(name, path)],
                     sizeBytes = cursor.safeLong(sizeColumn),
+                    modifiedSeconds = cursor.safeLong(modifiedColumn),
                     dateMillis = dateMillis,
                     bucketId = cursor.getString(bucketIdColumn).orEmpty(),
                     bucketName = cursor.getString(bucketNameColumn).orEmpty(),

@@ -9,10 +9,23 @@ android {
 
     defaultConfig {
         applicationId = "com.meteorsss.hdrphoto"
-        minSdk = 26
+        minSdk = 34
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        testInstrumentationRunner = "com.meteorsss.hdrphoto.InteractionProbe"
+        versionCode = 11
+        versionName = "1.1.9"
+    }
+
+    // PR builds never require credentials. Opt in only on a trusted release machine.
+    val signingFile = providers.environmentVariable("HDR_KEYSTORE").orNull
+    if (signingFile != null) {
+        signingConfigs.create("distribution") {
+            storeFile = file(signingFile)
+            storePassword = providers.environmentVariable("HDR_STORE_PASSWORD").get()
+            keyAlias = providers.environmentVariable("HDR_KEY_ALIAS").get()
+            keyPassword = providers.environmentVariable("HDR_KEY_PASSWORD").get()
+        }
+        buildTypes.getByName("release").signingConfig = signingConfigs.getByName("distribution")
     }
 
     compileOptions {
@@ -26,3 +39,5 @@ kotlin {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
+
+dependencies { testImplementation("junit:junit:4.13.2") }

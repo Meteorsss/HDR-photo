@@ -11,6 +11,7 @@ import android.widget.ImageView
 import kotlin.math.min
 
 class ZoomImageView(context: Context) : ImageView(context) {
+    var hold: (() -> Unit)? = null
     private val photoMatrix = Matrix()
     private val values = FloatArray(9)
     private var minScale = 1f
@@ -38,6 +39,7 @@ class ZoomImageView(context: Context) : ImageView(context) {
     private val gestureDetector = GestureDetector(
         context,
         object : GestureDetector.SimpleOnGestureListener() {
+            override fun onLongPress(e: MotionEvent) { hold?.invoke() }
             override fun onDoubleTap(event: MotionEvent): Boolean {
                 if (drawable == null) return true
                 if (currentScale > minScale * 1.4f) {
@@ -62,12 +64,12 @@ class ZoomImageView(context: Context) : ImageView(context) {
 
     override fun setImageDrawable(drawable: Drawable?) {
         super.setImageDrawable(drawable)
-        post { resetToFit() }
+        if (width > 0 && height > 0) resetToFit() else post { resetToFit() }
     }
 
     override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
         super.onSizeChanged(width, height, oldWidth, oldHeight)
-        post { resetToFit() }
+        if (width > 0 && height > 0) resetToFit() else post { resetToFit() }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {

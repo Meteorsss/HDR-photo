@@ -12,8 +12,8 @@ android {
         minSdk = 34
         targetSdk = 36
         testInstrumentationRunner = "com.meteorsss.hdrphoto.InteractionProbe"
-        versionCode = 11
-        versionName = "1.1.9"
+        versionCode = 12
+        versionName = "1.1.10"
     }
 
     // PR builds never require credentials. Opt in only on a trusted release machine.

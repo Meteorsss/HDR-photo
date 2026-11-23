@@ -68,6 +68,10 @@ class PhotoActivity : Activity() {
     private var dismissDragActive = false
     private var dismissAnimating = false
     private var held: Pair<android.graphics.Bitmap, android.graphics.Gainmap>? = null
+    private var holdActive = false
+    private var liveLookupFinished = false
+    private var playbackFromHold = false
+    private var extractedLiveUri: Uri? = null
     private var ignoreUntilUp = false
     private lateinit var detailScroll: ScrollView
     private val detailBack = android.window.OnBackInvokedCallback { hideDetails() }
@@ -75,15 +79,22 @@ class PhotoActivity : Activity() {
     private var detailAtTop = false
     private var detailSingle = false
     private lateinit var neighbor: ImageView
-    private val previewExecutor = Executors.newSingleThreadExecutor()
-    // Only two screen previews, never two additional full-resolution HDR originals.
-    private val previews = android.util.LruCache<Uri, android.graphics.Bitmap>(3)
-    @Volatile private var previewEpoch = 0
+    private val imageExecutor = Executors.newSingleThreadExecutor()
+    // Cache final-quality frames, never a thumbnail that must be replaced after the swipe.
+    // One decoder limits transient allocations; the cache bounds retained neighbor memory.
+    private val frames = ReadyFrameCache<Uri, Drawable>(
+        (Runtime.getRuntime().maxMemory() / 4).coerceIn(32L * 1024 * 1024, 128L * 1024 * 1024),
+    ) { drawable ->
+        (drawable as? BitmapDrawable)?.bitmap?.let { bitmap ->
+            bitmap.allocationByteCount.toLong() + (bitmap.gainmap?.gainmapContents?.allocationByteCount ?: 0)
+        } ?: 32L * 1024 * 1024
+    }
+    @Volatile private var frameEpoch = 0
     private var dragDelta = 0f
     private var dragReady = false
     private var pageAnimator: android.animation.ValueAnimator? = null
     private var pendingStep = 0
-    private val missingPreviews = mutableSetOf<Uri>()
+    private val failedFrames = mutableSetOf<Uri>()
     private var displayedUri: Uri? = null
 
 
@@ -103,7 +114,7 @@ class PhotoActivity : Activity() {
         } else {
             val uri = intent.data ?: return finish()
             currentItem = PhotoItem(0L, "", uri, 0, 0, intentLiveVideoUri())
-            loadCurrent(0)
+            loadCurrent()
         }
     }
 
@@ -111,14 +122,17 @@ class PhotoActivity : Activity() {
         if (dismissAnimating || pageAnimator != null) return true
         if (pendingStep != 0) {
             if (event.actionMasked != MotionEvent.ACTION_DOWN) return true
-            // A new gesture may cancel a slow, still pending preview.
-            pendingStep = 0; resetPageDrag()
+            // A new gesture may cancel a slow, still pending frame.
+            pendingStep = 0; loading.tag = null; loading.visibility = View.GONE; resetPageDrag()
         }
         if (detailsPanel.visibility == View.VISIBLE) return dispatchDetails(event)
         if (event.actionMasked == MotionEvent.ACTION_DOWN) ignoreUntilUp = false
-        if (held != null || ignoreUntilUp) {
+        if (holdActive || held != null || ignoreUntilUp) {
             if (event.actionMasked in intArrayOf(MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN)) {
-                releaseSdr(); ignoreUntilUp = true
+                endPhotoHold(); ignoreUntilUp = true; singlePointerGesture = false
+                val cancel = MotionEvent.obtain(event)
+                cancel.action = MotionEvent.ACTION_CANCEL
+                super.dispatchTouchEvent(cancel); cancel.recycle()
             }
             return true
         }
@@ -257,6 +271,7 @@ class PhotoActivity : Activity() {
     }
 
     private fun handleGallerySwipe(dx: Float, dy: Float): Boolean {
+        if (displayedUri != currentItem?.uri && loading.tag != null) return false
         if (detailsPanel.visibility == View.VISIBLE || imageView.isZoomed() || mediaPlayer != null) return false
         val horizontal = kotlin.math.abs(dx) > kotlin.math.abs(dy) * SWIPE_DIRECTION_BIAS
         if (horizontal && kotlin.math.abs(dx) >= dp(HORIZONTAL_SWIPE_DP)) {
@@ -274,10 +289,10 @@ class PhotoActivity : Activity() {
     }
 
     override fun onDestroy() {
-        loadToken.incrementAndGet(); previewEpoch++
-        releaseSdr(); hideDetails(); stopVideo()
-        MotionPhotoSupport.discard(liveVideoUri)
-        previewExecutor.shutdownNow()
+        loadToken.incrementAndGet(); frameEpoch++
+        endPhotoHold(); hideDetails(); stopVideo()
+        MotionPhotoSupport.discard(extractedLiveUri)
+        imageExecutor.shutdownNow(); frames.clear()
         videoSurface?.release()
         executor.shutdownNow()
         galleryPreview.setImageBitmap(null)
@@ -286,13 +301,41 @@ class PhotoActivity : Activity() {
     }
 
     override fun onPause() {
+        singlePointerGesture = false; ignoreUntilUp = true
         pendingStep = 0
         pageAnimator?.removeAllListeners(); pageAnimator?.cancel(); pageAnimator = null
-        resetPageDrag(); releaseSdr(); super.onPause()
+        resetPageDrag(); endPhotoHold(); stopVideo()
+        loading.tag = null; loading.visibility = View.GONE
+        super.onPause()
+    }
+
+    private fun holdPhoto() {
+        if (!singlePointerGesture || dragReady || dragDelta != 0f || dismissDragActive || dismissAnimating ||
+            pageAnimator != null || detailsPanel.visibility == View.VISIBLE || mediaPlayer != null ||
+            displayedUri != currentItem?.uri) return
+        holdActive = true
+        performPhotoHold()
+    }
+
+    private fun performPhotoHold() {
+        if (!holdActive || !liveLookupFinished) return
+        if (liveVideoUri != null) {
+            if (mediaPlayer == null && pendingVideoUri == null) {
+                imageView.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                playLive(fromHold = true)
+            }
+        } else holdSdr()
+    }
+
+    private fun endPhotoHold() {
+        holdActive = false
+        releaseSdr()
+        if (playbackFromHold) stopVideo()
     }
 
     private fun holdSdr() {
         if (!singlePointerGesture || dragReady || dismissDragActive || dismissAnimating || detailsPanel.visibility == View.VISIBLE || mediaPlayer != null || displayedUri != currentItem?.uri) return
+        if (held != null) return
         val bitmap = (imageView.drawable as? BitmapDrawable)?.bitmap ?: return
         val map = bitmap.gainmap ?: return
         held = bitmap to map
@@ -316,38 +359,24 @@ class PhotoActivity : Activity() {
     }
 
     private fun prefetchNeighbors() {
-        val epoch = ++previewEpoch
-        missingPreviews.clear()
-        for (delta in listOf(1,-1)) {
-            val uri = GallerySession.photos.getOrNull(GallerySession.index + delta)?.uri ?: continue
-            if (previews.get(uri) != null) continue
-            val edge = widthOrScreen().coerceIn(256, 1080)
-            previewExecutor.execute {
-                if (epoch != previewEpoch) return@execute
-                // Preserve aspect ratio and avoid replacing a square crop with a full-size photo.
-                val bitmap = runCatching {
-                    ImageDecoder.decodeBitmap(ImageDecoder.createSource(contentResolver, uri)) { decoder, info, _ ->
-                        val longest = maxOf(info.size.width, info.size.height)
-                        decoder.setTargetSampleSize(((longest + edge - 1) / edge).coerceAtLeast(1))
-                    }
-                }.getOrNull() ?: runCatching { contentResolver.loadThumbnail(uri, android.util.Size(edge, edge), null) }.getOrNull()
-                mainHandler.post {
-                    if (isDestroyed || epoch != previewEpoch) return@post
-                    if (bitmap != null) previews.put(uri, bitmap) else missingPreviews.add(uri)
-                    if (pendingStep == delta) settlePage(delta)
-                    else if (singlePointerGesture && pageAnimator == null && dragDelta != 0f) updatePageDrag(dragDelta, 0f)
-                }
-            }
+        ++frameEpoch
+        failedFrames.clear()
+        val adjacent = listOf(1, -1).mapNotNull { step ->
+            GallerySession.photos.getOrNull(GallerySession.index + step)?.let { step to it.uri }
+        }
+        frames.retain(adjacent.map { it.second }.toSet())
+        for ((delta, uri) in adjacent) {
+            if (frames[uri] == null) requestFrame(delta)
         }
     }
 
     private fun bindNeighbor(step: Int): Boolean {
         val uri = GallerySession.photos.getOrNull(GallerySession.index + step)?.uri ?: return false
-        val thumb = previews.get(uri)
-        if (thumb == null && uri !in missingPreviews) return false
+        // A displayed neighbor owns its frame even if the bounded cache has since evicted it.
         if (neighbor.tag != uri || neighbor.drawable == null) {
-            if (thumb != null) neighbor.setImageBitmap(thumb) else neighbor.setImageResource(android.R.drawable.ic_dialog_alert)
-            neighbor.tag = uri
+            val drawable = frames[uri]
+            if (drawable == null) return false
+            neighbor.setImageDrawable(drawable); neighbor.tag = uri
         }
         neighbor.visibility = View.VISIBLE
         return true
@@ -359,7 +388,7 @@ class PhotoActivity : Activity() {
     }
 
     private fun updatePageDrag(dx: Float, dy: Float): Boolean {
-        if (imageView.isZoomed() || mediaPlayer != null || dismissDragActive) return false
+        if (imageView.isZoomed() || mediaPlayer != null || dismissDragActive || (displayedUri != currentItem?.uri && loading.tag != null)) return false
         if (!dragReady && (kotlin.math.abs(dx) < dp(6) || kotlin.math.abs(dx) < kotlin.math.abs(dy)*1.25f)) return false
         if (dx == 0f) { resetPageDrag(); return true }
         val step = if (dx < 0) 1 else -1
@@ -367,6 +396,7 @@ class PhotoActivity : Activity() {
         val width = widthOrScreen().coerceAtLeast(1).toFloat()
         dragDelta = dx
         if (!bindNeighbor(step)) {
+            requestFrame(step)
             // Direction reversed into an uncached neighbor: don't reveal an empty edge.
             imageView.translationX = 0f; neighbor.visibility = View.GONE; dragReady = false
             return true
@@ -383,10 +413,39 @@ class PhotoActivity : Activity() {
         animatePage(step, commit = false)
     }
 
+    private val requestedFrames = mutableMapOf<Uri, Int>()
+
+    private fun requestFrame(step: Int) {
+        val uri = GallerySession.photos.getOrNull(GallerySession.index + step)?.uri ?: return
+        val epoch = frameEpoch
+        if (uri in failedFrames || requestedFrames[uri] == epoch) return
+        requestedFrames[uri] = epoch
+        imageExecutor.execute {
+            val drawable = if (epoch == frameEpoch) decodeDrawable(uri) else null
+            mainHandler.post {
+                if (requestedFrames[uri] == epoch) requestedFrames.remove(uri)
+                if (isDestroyed || epoch != frameEpoch) return@post
+                if (drawable != null) frames.put(uri, drawable) else failedFrames.add(uri)
+                if (pendingStep == step) settlePage(step)
+                else if (singlePointerGesture && pageAnimator == null && dragDelta != 0f) updatePageDrag(dragDelta, 0f)
+            }
+        }
+    }
+
     private fun settlePage(step: Int) {
-        if (GallerySession.photos.getOrNull(GallerySession.index + step) == null) { returnPageToCenter(); return }
-        if (!bindNeighbor(step)) { pendingStep = step; return }
-        pendingStep = 0
+        val item = GallerySession.photos.getOrNull(GallerySession.index + step) ?: run { returnPageToCenter(); return }
+        if (!bindNeighbor(step)) {
+            if (item.uri in failedFrames) {
+                pendingStep = 0; returnPageToCenter()
+                loading.tag = null; loading.text = "无法读取这张照片，请重试"; loading.visibility = View.VISIBLE
+            } else {
+                pendingStep = step
+                loading.tag = null; loading.text = "正在加载高清图片…"; loading.visibility = View.VISIBLE
+                requestFrame(step)
+            }
+            return
+        }
+        pendingStep = 0; loading.tag = null; loading.visibility = View.GONE
         animatePage(step, commit = true)
     }
 
@@ -403,10 +462,9 @@ class PhotoActivity : Activity() {
                 override fun onAnimationEnd(animation: android.animation.Animator) {
                     pageAnimator = null
                     if (commit) {
-                        // Hand off the very same visible preview in this frame, then upgrade in place.
-                        val landed = neighbor.drawable
-                        imageView.setImageDrawable(landed); displayedUri = null
-                        loadAt(GallerySession.index + step, step)
+                        // Transfer the final frame, with no second decode or quality replacement.
+                        val landed = neighbor.drawable ?: return
+                        loadAt(GallerySession.index + step, landed)
                     } else resetPageDrag()
                 }
             })
@@ -459,7 +517,7 @@ class PhotoActivity : Activity() {
         neighbor = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER; visibility = View.GONE }
         root.addView(neighbor, -1, -1)
         imageView = ZoomImageView(this).apply {
-            hold = ::holdSdr
+            hold = ::holdPhoto
             setBackgroundColor(Color.TRANSPARENT)
         }
         root.addView(imageView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
@@ -596,56 +654,53 @@ class PhotoActivity : Activity() {
         return panel
     }
 
-    private fun loadAt(index: Int, direction: Int = 0) {
+    private fun loadAt(index: Int, ready: Drawable? = null) {
         if (GallerySession.photos.isEmpty()) return
         GallerySession.setIndex(index)
         currentItem = GallerySession.photos[GallerySession.index]
-        loadCurrent(direction)
+        loadCurrent(ready)
     }
 
-    private fun loadCurrent(direction: Int) {
+    private fun loadCurrent(ready: Drawable? = null) {
         val item = currentItem ?: return
         val token = loadToken.incrementAndGet()
-        releaseSdr()
+        endPhotoHold()
         resetPageDrag()
-        dismissDragActive = false
-        dismissAnimating = false
+        dismissDragActive = false; dismissAnimating = false
         imageView.animate().cancel()
-        imageView.translationX = 0f
-        imageView.translationY = 0f
-        imageView.scaleX = 1f
-        imageView.scaleY = 1f
-        imageView.alpha = 1f
+        imageView.translationX = 0f; imageView.translationY = 0f
+        imageView.scaleX = 1f; imageView.scaleY = 1f; imageView.alpha = 1f
         dismissScrim.alpha = 1f
         stopVideo()
-        MotionPhotoSupport.discard(liveVideoUri)
+        MotionPhotoSupport.discard(extractedLiveUri); extractedLiveUri = null
         hideDetails()
-        liveButton.visibility = View.GONE
-        liveButton.text = "LIVE"
-        liveVideoUri = null
-        pendingVideoUri = null
-        val preview = previews.get(item.uri)
-        if (direction == 0 || preview == null) scheduleLoadingIndicator(item, token)
-        else { loading.tag = null; loading.visibility = View.GONE }
-
-        prefetchNeighbors()
-        executor.execute {
-            if (token != loadToken.get()) return@execute
-            val drawable = decodeDrawable(item.uri)
-            mainHandler.post {
-                if (token != loadToken.get() || isDestroyed) return@post
-                loading.tag = null; loading.visibility = View.GONE
-                if (drawable != null) {
-                    imageView.setImageDrawable(drawable); displayedUri = item.uri
-                } else {
-                    // An inaccessible item must not be mislabelled as the preceding photo.
-                    displayedUri = null
-                    if (preview == null) imageView.setImageDrawable(null)
-                    loading.text = "无法读取此照片，可滑到下一张"; loading.visibility = View.VISIBLE
+        liveButton.visibility = View.GONE; liveButton.text = "LIVE"
+        liveVideoUri = null; pendingVideoUri = null; liveLookupFinished = false
+        if (ready != null) {
+            showReadyFrame(item, ready)
+        } else {
+            displayedUri = null
+            scheduleLoadingIndicator(item, token)
+            imageExecutor.execute {
+                if (token != loadToken.get()) return@execute
+                val drawable = decodeDrawable(item.uri)
+                mainHandler.post {
+                    if (token != loadToken.get() || isDestroyed) return@post
+                    if (drawable != null) showReadyFrame(item, drawable) else {
+                        loading.tag = null
+                        loading.text = "无法读取此照片，可滑到下一张"; loading.visibility = View.VISIBLE
+                        prefetchNeighbors()
+                    }
                 }
             }
         }
         setupLivePhoto(item, token)
+    }
+
+    private fun showReadyFrame(item: PhotoItem, drawable: Drawable) {
+        loading.tag = null; loading.visibility = View.GONE
+        imageView.setImageDrawable(drawable); displayedUri = item.uri
+        prefetchNeighbors()
     }
 
     private fun scheduleLoadingIndicator(item: PhotoItem, token: Int) {
@@ -676,10 +731,14 @@ class PhotoActivity : Activity() {
         }
         val knownMotionPhoto = item.uri == intent.data && intent.getBooleanExtra(EXTRA_MOTION_PHOTO, false)
         executor.execute {
-            if (token == loadToken.get() && (knownMotionPhoto || MotionPhotoSupport.hasMotionPhotoMetadata(this, item.uri))) {
-                val extracted = MotionPhotoSupport.extractEmbeddedVideo(this, item.uri)
-                if (extracted != null) {
-                    mainHandler.post { setLiveVideo(extracted, token) }
+            if (token != loadToken.get()) return@execute
+            val extracted = if (knownMotionPhoto || MotionPhotoSupport.hasMotionPhotoMetadata(this, item.uri))
+                MotionPhotoSupport.extractEmbeddedVideo(this, item.uri) else null
+            mainHandler.post {
+                if (extracted != null) setLiveVideo(extracted, token, extracted = true)
+                else if (token == loadToken.get() && !isDestroyed) {
+                    liveLookupFinished = true
+                    performPhotoHold()
                 }
             }
         }
@@ -689,31 +748,33 @@ class PhotoActivity : Activity() {
         return intent.getStringExtra(EXTRA_LIVE_VIDEO_URI)?.let(Uri::parse)
     }
 
-    private fun setLiveVideo(uri: Uri, token: Int) {
-        if (token != loadToken.get() || isDestroyed) { MotionPhotoSupport.discard(uri); return }
-        liveVideoUri = uri
+    private fun setLiveVideo(uri: Uri, token: Int, extracted: Boolean = false) {
+        if (token != loadToken.get() || isDestroyed) {
+            if (extracted) MotionPhotoSupport.discard(uri)
+            return
+        }
+        if (extracted) extractedLiveUri = uri
+        liveVideoUri = uri; liveLookupFinished = true
         liveButton.visibility = View.VISIBLE
+        performPhotoHold()
     }
 
     private fun toggleLiveVideo() {
-        val uri = liveVideoUri ?: return
-        if (mediaPlayer != null) {
-            stopVideo()
-            return
-        }
+        if (mediaPlayer != null || pendingVideoUri != null) stopVideo() else playLive(fromHold = false)
+    }
 
+    private fun playLive(fromHold: Boolean) {
+        val uri = liveVideoUri ?: return
+        releaseSdr()
+        playbackFromHold = fromHold
         pendingVideoUri = uri
-        liveButton.text = "..."
-        videoView.alpha = 0f
-        videoView.visibility = View.VISIBLE
-        if (videoView.isAvailable) {
-            startVideo(uri)
-        } else {
-            pendingVideoUri = uri
-        }
+        liveButton.text = "…"
+        videoView.alpha = 0f; videoView.visibility = View.VISIBLE
+        if (videoView.isAvailable) startVideo(uri)
     }
 
     private fun startVideo(uri: Uri) {
+        if (playbackFromHold && !holdActive) return
         val surface = videoSurface ?: return
         pendingVideoUri = null
         mediaPlayer?.release()
@@ -727,22 +788,27 @@ class PhotoActivity : Activity() {
                 }
                 setSurface(surface)
                 setOnPreparedListener { player ->
-                    player.isLooping = false
+                    if (mediaPlayer !== player || (playbackFromHold && !holdActive)) return@setOnPreparedListener
+                    player.isLooping = playbackFromHold
                     lastVideoWidth = player.videoWidth
                     lastVideoHeight = player.videoHeight
                     lastVideoRotation = rotation
                     applyVideoFitTransform(lastVideoWidth, lastVideoHeight, lastVideoRotation)
                     liveButton.text = "PHOTO"
-                    imageView.visibility = View.GONE
-                    videoView.alpha = 1f
                     player.start()
                 }
-                setOnErrorListener { _, _, _ ->
-                    stopVideo()
+                setOnInfoListener { player, what, _ ->
+                    if (mediaPlayer === player && what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
+                        imageView.visibility = View.GONE; videoView.alpha = 1f
+                    }
+                    false
+                }
+                setOnErrorListener { player, _, _ ->
+                    if (mediaPlayer === player) stopVideo()
                     true
                 }
-                setOnCompletionListener {
-                    stopVideo()
+                setOnCompletionListener { player ->
+                    if (mediaPlayer === player) stopVideo()
                 }
                 prepareAsync()
             }
@@ -752,6 +818,7 @@ class PhotoActivity : Activity() {
     }
 
     private fun stopVideo() {
+        playbackFromHold = false
         mediaPlayer?.release()
         mediaPlayer = null
         pendingVideoUri = null
